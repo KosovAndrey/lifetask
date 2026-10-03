@@ -220,3 +220,32 @@ func TestQuickInput(t *testing.T) {
 		t.Fatalf("дата экрана: %d %q", code, p.Preview)
 	}
 }
+
+func TestProjectsRecurrencesNotes(t *testing.T) {
+	st := store.New(testdb.New(t))
+	c := client{t, api.New(st, token).Handler()}
+	var p struct{ ID int }
+	if code := c.do("POST", "/api/projects", `{"name":"LifeTask"}`, &p); code != 201 || p.ID == 0 {
+		t.Fatalf("проект: %d", code)
+	}
+	var rec struct{ ID string }
+	if code := c.do("POST", "/api/recurrences", `{"rule":"FREQ=DAILY","time":"08:00","duration_min":20,"item":{"title":"Зарядка"}}`, &rec); code != 201 {
+		t.Fatalf("повтор: %d", code)
+	}
+	var items []struct{ ID string }
+	c.do("GET", "/api/items?q=Зарядка", "", &items)
+	if len(items) != store.RecurHorizonDays+1 {
+		t.Fatalf("экземпляров: %d", len(items))
+	}
+	var stopped struct{ Removed int }
+	if code := c.do("POST", "/api/recurrences/"+rec.ID+"/stop", `{}`, &stopped); code != 200 || stopped.Removed != len(items) {
+		t.Fatalf("остановка: %d removed=%d", code, stopped.Removed)
+	}
+	// Поиск заметок по тексту, а не только по заголовку.
+	c.do("POST", "/api/items", `{"kind":"note","title":"Ментор","body":[{"type":"md","text":"спросить про on-call"}]}`, nil)
+	var notes []struct{ Title string }
+	c.do("GET", "/api/items?kind=note&q=on-call", "", &notes)
+	if len(notes) != 1 || notes[0].Title != "Ментор" {
+		t.Fatalf("поиск заметок: %+v", notes)
+	}
+}

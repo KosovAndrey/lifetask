@@ -396,14 +396,19 @@ func (s *Store) ListItems(ctx context.Context, f Filter) ([]domain.Item, error) 
 		add("i.sphere_id = $%d", f.SphereID)
 	}
 	if f.Query != "" {
-		add("i.title ILIKE '%%' || $%d || '%%'", f.Query)
+		// Ищем и в заголовке, и в тексте блоков (заметки).
+		add("(i.title ILIKE '%%' || $%[1]d || '%%' OR i.body::text ILIKE '%%' || $%[1]d || '%%')", f.Query)
+	}
+	order := "i.planned_date NULLS LAST, i.start_at NULLS LAST, i.created_at"
+	if f.Kind == string(domain.KindNote) {
+		order = "i.updated_at DESC" // заметки — свежие сверху
 	}
 	limit := f.Limit
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
 	return s.queryItems(ctx, strings.Join(where, " AND ")+
-		fmt.Sprintf(" ORDER BY i.planned_date NULLS LAST, i.start_at NULLS LAST, i.created_at LIMIT %d", limit), args...)
+		fmt.Sprintf(" ORDER BY %s LIMIT %d", order, limit), args...)
 }
 
 // Day — всё, что относится к дню: встречи и блоки со временем, задачи на день,

@@ -57,6 +57,9 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/week/{date}", a.week)
 	mux.HandleFunc("GET /api/stats", a.stats)
 	mux.HandleFunc("GET /api/recurrences", a.recurrences)
+	mux.HandleFunc("POST /api/recurrences", a.createRecurrence)
+	mux.HandleFunc("POST /api/recurrences/{id}/stop", a.stopRecurrence)
+	mux.HandleFunc("POST /api/projects", a.createProject)
 	mux.HandleFunc("GET /api/graph", a.graph)
 	mux.HandleFunc("POST /api/quick", a.quick)
 	mux.HandleFunc("GET /api/journal", a.journalList)
@@ -651,4 +654,103 @@ func (a *API) quick(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, p)
+}
+
+func (a *API) createProject(w http.ResponseWriter, r *http.Request) {
+	var p domain.Project
+	if err := decode(r, &p); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := a.st.CreateProject(r.Context(), p)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+// createRecurrence — серия из веба: шаблон задачи + правило; экземпляры на
+// горизонт создаются сразу, в той же транзакции.
+func (a *API) createRecurrence(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Rule        string      `json:"rule"`
+		Start       string      `json:"start"`
+		Until       string      `json:"until"`
+		Time        string      `json:"time"`
+		DurationMin int         `json:"duration_min"`
+		Item        domain.Item `json:"item"`
+	}
+	if err := decode(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	rec := store.Recurrence{Rule: req.Rule, Template: req.Item, Start: domain.Today()}
+	var err error
+	if req.Start != "" {
+		if rec.Start, err = domain.ParseDate(req.Start); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	if req.Until != "" {
+		u, err := domain.ParseDate(req.Until)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		rec.Until = &u
+	}
+	if req.Time != "" {
+		rec.StartTime = &req.Time
+	}
+	if req.DurationMin > 0 {
+		rec.DurationMin = &req.DurationMin
+	}
+	if rec.Template.Source == "" {
+		rec.Template.Source = "web"
+	}
+	var out store.Recurrence
+	err = a.st.InTx(r.Context(), func(tx *store.Store) error {
+		var err error
+		if out, err = tx.CreateRecurrence(r.Context(), rec); err != nil {
+			return err
+		}
+		_, err = tx.GenerateOne(r.Context(), out.ID, domain.Today().AddDays(store.RecurHorizonDays))
+		return err
+	})
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (a *API) stopRecurrence(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		From string `json:"from"`
+	}
+	if err := decode(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	from := domain.Today()
+	if req.From != "" {
+		var err error
+		if from, err = domain.ParseDate(req.From); err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	var removed int
+	err := a.st.InTx(r.Context(), func(tx *store.Store) error {
+		var err error
+		_, removed, err = tx.StopRecurrence(r.Context(), r.PathValue("id"), from)
+		return err
+	})
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"removed": removed})
 }

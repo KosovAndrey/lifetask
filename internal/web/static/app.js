@@ -193,8 +193,22 @@ function mins(m) {
 const state = { spheres: [], sphereById: new Map() };
 
 async function loadRefs() {
-  state.spheres = await api('GET', 'spheres');
-  state.sphereById = new Map(state.spheres.map((s) => [s.id, s]));
+  const [spheres, projects] = await Promise.all([api('GET', 'spheres'), api('GET', 'projects')]);
+  state.spheres = spheres;
+  state.sphereById = new Map(spheres.map((s) => [s.id, s]));
+  state.projects = projects || [];
+}
+
+// «Группа / Проект» — путь по дереву групп.
+function projectPath(p) {
+  const byId = new Map(state.projects.map((x) => [x.id, x]));
+  const parts = [p.name];
+  for (let cur = p, guard = 0; cur.parent_id && guard < 10; guard++) {
+    cur = byId.get(cur.parent_id);
+    if (!cur) break;
+    parts.unshift(cur.name);
+  }
+  return parts.join(' / ');
 }
 
 function sphereOf(it) { return it.sphere_id ? state.sphereById.get(it.sphere_id) : null; }
@@ -565,6 +579,39 @@ async function openEditor(id, onDone, preset = {}) {
     state.spheres.map((s) => h('option', { value: s.id, selected: s.id === it.sphere_id }, `${s.icon} ${s.name}`)));
   const status = h('select', {}, Object.entries(STATUSES).map(([k, v]) => h('option', { value: k, selected: k === it.status }, v)));
 
+  const project = h('select', {}, h('option', { value: '' }, '— без проекта —'),
+    [...(state.projects || [])].sort((a, b) => projectPath(a).localeCompare(projectPath(b)))
+      .map((p) => h('option', { value: p.id, selected: p.id === it.project_id }, projectPath(p))));
+  const newProject = h('button', { class: 'btn icon', type: 'button', title: 'Новый проект', onclick: async () => {
+    const name = prompt('Название проекта (группу можно задать позже):');
+    if (!name || !name.trim()) return;
+    try {
+      const p = await api('POST', 'projects', { name: name.trim(), sphere_id: sphere.value ? Number(sphere.value) : null });
+      state.projects.push(p);
+      project.append(h('option', { value: p.id, selected: true }, p.name));
+      project.value = String(p.id);
+    } catch (err) { handleError(err); }
+  } }, '+');
+
+  // Повтор — только при создании: серия создаётся вместо одной задачи.
+  const repeat = h('select', {},
+    h('option', { value: '' }, 'не повторяется'),
+    h('option', { value: 'FREQ=DAILY' }, 'каждый день'),
+    h('option', { value: 'FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR' }, 'по будням'),
+    h('option', { value: 'weekly' }, 'каждую неделю (в день даты)'),
+    h('option', { value: 'FREQ=MONTHLY' }, 'каждый месяц (в число даты)'),
+    h('option', { value: 'custom' }, 'своё правило (RRULE)…'));
+  const stopRepeat = it.recurrence_id ? h('button', { class: 'btn', type: 'button', onclick: async () => {
+    const from = it.occurrence_date || todayStr();
+    if (!confirm(`Остановить повтор с ${shortDay(from)}? Будущие несделанные экземпляры удалятся.`)) return;
+    try {
+      const r = await api('POST', `recurrences/${it.recurrence_id}/stop`, { from });
+      closeSheet();
+      toast(`Повтор остановлен, убрано: ${(r && r.removed) || 0}`);
+      onDone && onDone();
+    } catch (err) { handleError(err); }
+  } }, '⏹ Остановить повтор') : null;
+
   const qlabel = h('span', { class: `qlabel q${detail.quadrant || 4}` });
   const important = h('input', { type: 'checkbox', checked: it.important });
   const urgent = h('input', { type: 'checkbox', checked: it.urgent });
@@ -653,6 +700,7 @@ async function openEditor(id, onDone, preset = {}) {
     set('kind', kind);
     set('status', status.value);
     set('sphere_id', sphere.value ? Number(sphere.value) : null);
+    set('project_id', project.value ? Number(project.value) : null);
     set('important', important.checked);
     set('urgent', urgent.checked);
     if (date.value && from.value) {
@@ -673,6 +721,33 @@ async function openEditor(id, onDone, preset = {}) {
     // Время сравниваем как моменты, а не строки (сервер отдаёт другое представление).
     for (const k of ['start_at', 'end_at', 'deadline']) {
       if (k in patch && patch[k] && base[k] && new Date(patch[k]).getTime() === new Date(base[k]).getTime()) delete patch[k];
+    }
+    if (!id && repeat.value) {
+      let rule = repeat.value;
+      const start = date.value || todayStr();
+      if (rule === 'weekly') rule = 'FREQ=WEEKLY;BYDAY=' + ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'][weekday(start)];
+      if (rule === 'FREQ=MONTHLY') rule += ';BYMONTHDAY=' + Number(start.slice(8));
+      if (rule === 'custom') {
+        rule = prompt('Правило: например FREQ=WEEKLY;BYDAY=TU,TH или FREQ=WEEKLY;INTERVAL=2;BYDAY=MO');
+        if (!rule) return;
+      }
+      const tpl = { ...patch };
+      for (const k of ['planned_date', 'start_at', 'end_at', 'deadline', 'status']) delete tpl[k];
+      const req = { rule, start, item: { ...tpl, title: t, kind } };
+      if (from.value) {
+        req.time = from.value;
+        if (to.value && to.value > from.value) {
+          const [h1, m1] = from.value.split(':').map(Number), [h2, m2] = to.value.split(':').map(Number);
+          req.duration_min = h2 * 60 + m2 - (h1 * 60 + m1);
+        }
+      }
+      try {
+        await api('POST', 'recurrences', req);
+        closeSheet();
+        toast('🔁 Повтор создан на две недели вперёд');
+        onDone && onDone();
+      } catch (err) { handleError(err); }
+      return;
     }
     try {
       if (id) {
@@ -698,6 +773,7 @@ async function openEditor(id, onDone, preset = {}) {
       h('div', { class: 'wide' }, kindSeg),
       f('Сфера', sphere),
       f('Статус', status),
+      h('label', { class: 'field wide' }, 'Проект', h('div', { class: 'row' }, project, newProject)),
       h('div', { class: 'wide row' },
         h('label', { class: 'toggle' }, important, 'Важно'),
         h('label', { class: 'toggle' }, urgent, 'Срочно'),
@@ -713,7 +789,8 @@ async function openEditor(id, onDone, preset = {}) {
         ? f('Вес в прогрессе родителя', weight) : null,
       timeRow ? h('div', { class: 'wide' }, timeRow) : null,
       it.postpone_count ? h('div', { class: 'wide field' }, `Переносов: ${it.postpone_count}`) : null,
-      it.recurrence_id ? h('div', { class: 'wide field' }, '🔁 Экземпляр повтора: переносы не считаются') : null,
+      it.recurrence_id ? h('div', { class: 'wide row field' }, '🔁 Экземпляр повтора: переносы не считаются', stopRepeat) : null,
+      !id ? f('Повтор', repeat, 'wide') : null,
       h('div', { class: 'wide' }, renderBlocks(body, () => (bodyChanged = true))),
     ),
     subs,
@@ -1255,6 +1332,45 @@ async function logout() {
   location.reload();
 }
 
+// ── Заметки ──────────────────────────────────────────────────────────────────
+
+let notesQuery = '';
+
+function noteSnippet(it) {
+  const md = (it.body || []).find((b) => b.type === 'md' && b.text);
+  if (md) return md.text.replace(/[*`#>\[\]]/g, '').slice(0, 220);
+  const ch = (it.body || []).find((b) => b.type === 'checklist');
+  return ch ? ch.items.map((x) => (x.done ? '☑ ' : '☐ ') + x.text).join(' · ').slice(0, 220) : '';
+}
+
+async function viewNotes() {
+  const q = notesQuery.trim();
+  const notes = await api('GET', `items?kind=note&limit=200${q ? '&q=' + encodeURIComponent(q) : ''}`);
+  const search = h('input', { type: 'search', placeholder: 'Поиск по заметкам', value: notesQuery, 'aria-label': 'Поиск по заметкам' });
+  let t;
+  search.addEventListener('input', () => {
+    clearTimeout(t);
+    t = setTimeout(() => { notesQuery = search.value; render().then(() => {
+      const el = document.querySelector('.quick input[type=search]');
+      if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+    }); }, 300);
+  });
+  return [
+    h('div', { class: 'bar' }, h('h1', {}, 'Заметки'),
+      h('button', { class: 'btn primary', onclick: () => openEditor(null, render, { kind: 'note' }) }, 'Новая заметка'),
+      h('div', { class: 'sub' }, 'Мысли, конспекты, ссылки. Боту можно написать «идея: …» или «заметка: …».')),
+    h('div', { class: 'quick' }, search),
+    notes.length ? h('div', { class: 'items notes', style: { 'margin-top': '12px' } }, notes.map((n) => {
+      const sp = sphereOf(n);
+      return h('div', { class: 'note card', style: sp ? { '--sphere': sp.color } : {}, onclick: () => openEditor(n.id, render) },
+        h('h3', {}, n.title),
+        noteSnippet(n) ? h('p', {}, noteSnippet(n)) : null,
+        h('div', { class: 'meta' }, sp ? h('span', {}, `${sp.icon} ${sp.name}`) : null,
+          h('span', {}, shortDay(mskDate(n.updated_at))), (n.tags || []).map((tg) => h('span', { class: 'tag' }, tg))));
+    })) : h('div', { class: 'empty' }, q ? 'Ничего не нашлось.' : 'Заметок пока нет.'),
+  ];
+}
+
 // ── Роутинг ──────────────────────────────────────────────────────────────────
 
 function go(hash) { location.hash = hash; }
@@ -1297,12 +1413,15 @@ async function render() {
       case 'stats': nodes = await viewStats(); break;
       case 'graph': nodes = await viewGraph(); break;
       case 'journal': nodes = await viewJournal(arg || todayStr()); break;
+      case 'notes': nodes = await viewNotes(); break;
       default: nodes = await viewDay(arg || todayStr());
     }
     if (seq !== renderSeq) return; // пока грузили, пользователь ушёл на другой экран
     $('fab').hidden = false;
     // Вкладку подсвечиваем только после загрузки: без сети экран остаётся прежним.
     document.querySelectorAll('.tabs a').forEach((a) => a.classList.toggle('active', a.dataset.tab === tab));
+    // На телефоне вкладки прокручиваются — активная должна быть видна.
+    document.querySelector('.tabs a.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     $('view').replaceChildren(...[nodes].flat(Infinity).filter(Boolean));
     if (tab === 'stats' || tab === 'graph') charts.forEach((draw) => draw());
     refreshInboxCount();
@@ -1329,6 +1448,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 $('sheet-backdrop').addEventListener('click', closeSheet);
 $('fab').addEventListener('click', () => {
   const { tab, arg } = route();
+  if (tab === 'notes') return openEditor(null, render, { kind: 'note' });
   openEditor(null, render, { planned_date: tab === 'day' ? arg || todayStr() : todayStr() });
 });
 render();

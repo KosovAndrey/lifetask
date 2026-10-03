@@ -1,0 +1,5 @@
+.pgdata/
+.env
+/bin/
+tmp/
+backups/

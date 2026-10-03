@@ -1,0 +1,66 @@
+# Прод на VPS рядом с tryberry, но отдельным проектом: своя база, свой том.
+# К сети tryberry подключаемся только ради xray-прокси (Anthropic и Groq из РФ напрямую не отвечают).
+name: lifeplan
+
+services:
+  app:
+    build: .
+    container_name: lp_app
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: "postgres://lifeplan:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/lifeplan?sslmode=disable"
+      LISTEN_ADDR: "0.0.0.0:8090"
+      TZ: "Europe/Moscow"
+    ports:
+      - "127.0.0.1:8090:8090"   # только локально: наружу — через nginx tryberry
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [default, tryberry]
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: lp_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lifeplan
+      POSTGRES_USER: lifeplan
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+      TZ: "Europe/Moscow"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lifeplan -d lifeplan"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backup:
+    image: prodrigestivill/postgres-backup-local:16
+    container_name: lp_backup
+    restart: unless-stopped
+    volumes:
+      - ./backups:/backups
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: lifeplan
+      POSTGRES_USER: lifeplan
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_EXTRA_OPTS: "-Z6"
+      SCHEDULE: "@daily"
+      BACKUP_KEEP_DAYS: 14
+      BACKUP_KEEP_WEEKS: 8
+      BACKUP_KEEP_MONTHS: 12
+      TZ: "Europe/Moscow"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+
+networks:
+  tryberry:
+    external: true
+    name: ${TRYBERRY_NETWORK:-tryberrybot_default}

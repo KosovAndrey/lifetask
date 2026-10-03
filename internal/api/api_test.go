@@ -194,3 +194,29 @@ func TestIdempotencyAndProgress(t *testing.T) {
 		t.Fatalf("прогресс по весам: %v", got.Progress)
 	}
 }
+
+func TestQuickInput(t *testing.T) {
+	st := store.New(testdb.New(t))
+	c := client{t, api.New(st, token).Handler()}
+	var p struct{ Preview []string }
+	if code := c.do("POST", "/api/quick", `{"text":"уборка каждую субботу"}`, &p); code != 200 {
+		t.Fatalf("повтор: %d", code)
+	}
+	if len(p.Preview) != 1 || !strings.Contains(p.Preview[0], "🔁 «Уборка» по сб") {
+		t.Fatalf("превью: %q", p.Preview)
+	}
+	// Входящее → задача на день экрана, входящее закрывается.
+	var msg struct{ ID string }
+	c.do("POST", "/api/inbox", `{"text":"позвонить в банк"}`, &msg)
+	if code := c.do("POST", "/api/quick", `{"inbox_id":"`+msg.ID+`"}`, &p); code != 200 {
+		t.Fatalf("оформить: %d", code)
+	}
+	var inbox []any
+	c.do("GET", "/api/inbox", "", &inbox)
+	if len(inbox) != 0 {
+		t.Fatalf("входящее не закрылось: %d", len(inbox))
+	}
+	if code := c.do("POST", "/api/quick", `{"text":"купить хлеб","date":"2026-10-07"}`, &p); code != 200 || !strings.Contains(p.Preview[0], "ср 07.10") {
+		t.Fatalf("дата экрана: %d %q", code, p.Preview)
+	}
+}

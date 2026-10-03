@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"gitlab.com/KosovAndrey/lifeplan/internal/changeplan"
 	"gitlab.com/KosovAndrey/lifeplan/internal/domain"
+	"gitlab.com/KosovAndrey/lifeplan/internal/parse"
 	"gitlab.com/KosovAndrey/lifeplan/internal/store"
 )
 
@@ -56,6 +58,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stats", a.stats)
 	mux.HandleFunc("GET /api/recurrences", a.recurrences)
 	mux.HandleFunc("GET /api/graph", a.graph)
+	mux.HandleFunc("POST /api/quick", a.quick)
 	mux.HandleFunc("GET /api/journal", a.journalList)
 	mux.HandleFunc("GET /api/journal/{date}", a.journal)
 	mux.HandleFunc("PATCH /api/journal/{date}", a.saveJournal)
@@ -590,4 +593,62 @@ func (a *API) saveJournal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, v)
+}
+
+// quick — быстрый ввод из веба: текст (или входящее) разбирается правилами и сразу
+// применяется планом. Без сети запрос ждёт в очереди и разбирается при отправке.
+func (a *API) quick(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Text    string `json:"text"`
+		InboxID string `json:"inbox_id"`
+		Date    string `json:"date"` // день экрана — если в тексте даты нет
+	}
+	if err := decode(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.InboxID != "" {
+		m, err := a.st.GetInbox(r.Context(), req.InboxID)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		req.Text = m.Content()
+	}
+	if strings.TrimSpace(req.Text) == "" {
+		writeErr(w, http.StatusBadRequest, errors.New("пустой текст"))
+		return
+	}
+	cands, err := a.st.TimeCandidates(r.Context(), 30)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	in := parse.Input{Text: req.Text, Now: time.Now()}
+	for _, c := range cands {
+		in.Candidates = append(in.Candidates, parse.Candidate{ID: c.ID, Title: c.Title})
+	}
+	res, _ := parse.Rules{}.Parse(r.Context(), in)
+	if req.Date != "" && res.PlannedDate == nil && res.StartAt == nil && res.RRule == nil && res.Intent != parse.IntentTimeLog {
+		res.PlannedDate = &req.Date
+	}
+	ops, err := res.Ops(req.InboxID)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.InboxID == "" { // Ops всегда закрывает входящее — без него эта операция лишняя
+		ops = ops[:len(ops)-1]
+	}
+	for i := range ops {
+		if ops[i].Item != nil {
+			ops[i].Item["source"] = json.RawMessage(`"web"`)
+		}
+	}
+	p, err := a.plans.ApplyNow(r.Context(), "me", "Быстрый ввод: "+req.Text, ops)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
 }

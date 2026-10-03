@@ -274,29 +274,22 @@ function list(items, opts) {
 
 // ── Экран «День» ─────────────────────────────────────────────────────────────
 
-// Быстрый ввод: «16:00 Созвон», «16:00-17:00 Созвон», иначе просто задача на день.
-function parseQuick(text, date) {
-  const m = text.match(/^(\d{1,2})[:.](\d{2})(?:\s*[-–]\s*(\d{1,2})[:.](\d{2}))?\s+(.+)$/);
-  if (!m) return { title: text, planned_date: date };
-  const pad = (x) => x.padStart(2, '0');
-  const item = { title: m[5], planned_date: date, start_at: toISO(date, `${pad(m[1])}:${m[2]}`) };
-  if (m[3]) item.end_at = toISO(date, `${pad(m[3])}:${m[4]}`);
-  return item;
-}
-
 async function viewDay(date) {
   const day = await api('GET', `day/${date}`);
   const today = todayStr();
   const reload = () => render();
 
-  const input = h('input', { placeholder: 'Новая задача · «16:00 Созвон»', enterkeyhint: 'done', 'aria-label': 'Новая задача' });
+  const input = h('input', { placeholder: '«завтра в 16 созвон», «уборка 40м»…', enterkeyhint: 'done', 'aria-label': 'Новая задача' });
+  // Разбор на сервере теми же правилами, что в боте: «завтра в 16 созвон»,
+  // «уборка каждую субботу», «уборка 40м». Без сети — в очередь, разберётся при отправке.
   const add = async () => {
     const text = input.value.trim();
     if (!text) return;
     try {
-      await api('POST', 'items', parseQuick(text, date));
+      const p = await api('POST', 'quick', { text, date });
       input.value = '';
-      reload();
+      if (p && p.preview) toast(p.preview.join(' · '));
+      if (!p || !p.queued) reload();
     } catch (err) { handleError(err); }
   };
   input.addEventListener('keydown', (e) => e.key === 'Enter' && add());
@@ -440,7 +433,7 @@ async function viewInbox() {
 
   return [
     h('div', { class: 'bar' }, h('h1', {}, 'Входящие'),
-      h('div', { class: 'sub' }, 'Разбираются в боте (кнопки) или на вечернем разборе с Claude.')),
+      h('div', { class: 'sub' }, '✓ — оформить автоматически (даты, время, повторы), 📥 — оставить на вечерний разбор.')),
     h('div', { class: 'field' }, input),
     h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: add }, 'Записать')),
     msgs.length ? h('div', { class: 'items' }, msgs.map((m) =>
@@ -450,6 +443,13 @@ async function viewInbox() {
           h('div', { class: 'when' }, `${shortDay(mskDate(m.created_at))} ${hm(m.created_at)} · ${statusLabel[m.status] || m.status}`),
           m.parse_error ? h('div', { class: 'err' }, 'не разобралось: ' + m.parse_error) : null),
         h('div', { class: 'acts' },
+          h('button', { class: 'btn', title: 'Оформить по правилам', onclick: async () => {
+            try {
+              const p = await api('POST', 'quick', { inbox_id: m.id });
+              if (p && p.preview) toast(p.preview.filter((l) => !l.startsWith('📥')).join(' · '));
+              render();
+            } catch (err) { handleError(err); }
+          } }, '✓'),
           m.status !== 'deferred' ? h('button', { class: 'btn', title: 'На вечер', onclick: () => resolve(m.id, 'deferred') }, '📥') : null,
           h('button', { class: 'btn danger', title: 'Удалить', onclick: () => resolve(m.id, 'rejected') }, '✗'))))
     ) : h('div', { class: 'empty' }, 'Пусто — всё разобрано.'),

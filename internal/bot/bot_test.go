@@ -312,3 +312,19 @@ func TestDiaryFromBot(t *testing.T) {
 		t.Fatal("ответ на бриф не должен падать во входящие")
 	}
 }
+
+func TestRulesParserWithoutKey(t *testing.T) {
+	ctx := context.Background()
+	st := store.New(testdb.New(t))
+	tg := &fakeTG{}
+	b := New(st, tg, owner, parse.Rules{}, nil)
+	b.Handle(ctx, Incoming{ChatID: owner, MessageID: 1, Text: "уборка каждую субботу"})
+	card := tg.last()
+	if !strings.Contains(card.text, "🔁 «Уборка» по сб") {
+		t.Fatalf("карточка: %q", card.text)
+	}
+	b.Handle(ctx, Incoming{ChatID: owner, CallbackID: "c", CallbackData: button(t, card, "a:"), CallbackMsgID: card.id})
+	if recs, _ := st.Recurrences(ctx); len(recs) != 1 {
+		t.Fatalf("серий: %d", len(recs))
+	}
+}

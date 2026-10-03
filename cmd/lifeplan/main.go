@@ -152,9 +152,10 @@ func startBot(ctx context.Context, st *store.Store, publicURL string) error {
 	if err != nil {
 		return fmt.Errorf("AI_PROXY_URL: %w", err)
 	}
-	var parser parse.Parser
+	// Без ключа — разбор по правилам; с ключом — Claude, а правила как запасной.
+	var parser parse.Parser = parse.Rules{}
 	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-		parser = parse.NewClaude(key, aiClient)
+		parser = parse.Fallback{Primary: parse.NewClaude(key, aiClient), Secondary: parse.Rules{}}
 	}
 	var tr stt.Transcriber
 	if key := os.Getenv("GROQ_API_KEY"); key != "" {

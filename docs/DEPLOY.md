@@ -5,7 +5,7 @@
 ## Первый запуск
 
 ```bash
-git clone <repo> ~/lifeplan && cd ~/lifeplan
+git clone git@gitlab.com:KosovAndrey/lifeplan.git ~/projects/lifeplan && cd ~/projects/lifeplan
 cp .env.example .env && nano .env        # пароль БД, API_TOKEN, ключи
 docker network ls | grep default         # имя сети tryberry → TRYBERRY_NETWORK
 docker compose up -d --build
@@ -40,6 +40,12 @@ Nginx общий с tryberry (контейнер `tryberry_nginx`) и ходит
 Продлевает сертификат существующий контейнер `tryberry_certbot`, nginx перечитывает его раз в 6 часов.
 
 Офлайн-режим (сервис-воркер) работает только по HTTPS: по голому IP сайт откроется, но без офлайна.
+
+## Обновление
+
+```bash
+cd ~/projects/lifeplan && git pull && docker compose up -d --build app
+```
 
 ## Прокси
 

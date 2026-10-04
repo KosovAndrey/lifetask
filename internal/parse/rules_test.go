@@ -33,7 +33,7 @@ func TestRules(t *testing.T) {
 		{in: "подготовка к собесу 1ч20", intent: IntentTimeLog, title: "Подготовка к собесу", sphere: "career", minutes: 80, timeItem: "s1"},
 		{in: "чтение 1.5ч", intent: IntentTimeLog, title: "Чтение", minutes: 90},
 		{in: "сдать отчёт до пятницы срочно", intent: IntentTask, title: "Сдать отчёт", deadline: "2026-10-09T23:59:00+03:00", urgent: true},
-		{in: "оплатить интернет 10.10", intent: IntentTask, title: "Оплатить интернет", sphere: "finance", date: "2026-10-10"},
+		{in: "оплатить интернет 10.10", intent: IntentTask, title: "Оплатить интернет", sphere: "home", date: "2026-10-10"},
 		{in: "курс 1с 12 октября в 19:00 на 2 часа", intent: IntentEvent, title: "Курс 1с", sphere: "study",
 			start: "2026-10-12T19:00:00+03:00", end: "2026-10-12T21:00:00+03:00", estimate: 120},
 		{in: "позвонить маме через 2 часа", intent: IntentEvent, title: "Позвонить маме", start: "2026-10-03T20:00:00+03:00"},

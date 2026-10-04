@@ -394,7 +394,7 @@ var googleColors = map[string]string{
 // «ближайшего» склеил бы Работу с Учёбой (обе голубые).
 var defaultColors = map[string]string{
 	"work": "9", "career": "7", "study": "1", "product": "11",
-	"home": "6", "leisure": "5", "health": "2",
+	"home": "5", "leisure": "6", "health": "2",
 }
 
 // sphereColors: style.gcal_color (ручная настройка) → цвет по умолчанию → ближайший.

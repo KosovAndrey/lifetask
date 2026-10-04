@@ -8,8 +8,8 @@ FROM (VALUES
     ('career',  '#00C4C4', '#12A7A7'),
     ('study',   '#006899', '#006A94'),
     ('product', '#993C23', '#944632'),
-    ('home',    '#E79551', '#C4804A'),
-    ('leisure', '#7C5700', '#7A5B00'),
+    ('home',    '#7C5700', '#7A5B00'),
+    ('leisure', '#E79551', '#C4804A'),
     ('health',  '#73C076', '#65A467')
 ) AS v(slug, light, dark)
 WHERE s.slug = v.slug;

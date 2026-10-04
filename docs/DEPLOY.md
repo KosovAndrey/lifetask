@@ -43,6 +43,11 @@ Nginx общий с tryberry (контейнер `tryberry_nginx`) и ходит
 
 ## Обновление
 
+После настройки своего git-сервера (репозиторий `infra`, git.lifetask.ru) — само: пуш в main → тесты → деплой
+с healthcheck и откатом (`.forgejo/workflows/ci.yml`).
+
+Вручную (до CI или если CI лежит):
+
 ```bash
 cd ~/projects/lifeplan && git pull && docker compose up -d --build app
 ```

@@ -5,6 +5,7 @@ name: lifeplan
 services:
   app:
     build: .
+    image: lifeplan-app:latest   # имя нужно деплою: прежний образ сохраняется как :rollback
     container_name: lp_app
     restart: unless-stopped
     env_file: .env

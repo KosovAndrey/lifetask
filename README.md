@@ -16,6 +16,7 @@
 | `docs/DESIGN.md` | архитектура и модель данных |
 | `docs/PLAN-OPS.md` | формат плана изменений |
 | `docs/DEPLOY.md` | развёртывание на VPS, домен, Google |
+| `.forgejo/workflows` | CI/CD на своём Forgejo: тесты на Postgres, проверка JS, деплой с откатом |
 
 ## Разработка
 

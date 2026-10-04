@@ -1,0 +1,77 @@
+# CI/CD на своём Forgejo (git.lifetask.ru): проверки на каждый пуш и PR,
+# деплой на VPS после зелёных проверок в main.
+#
+# Секреты репозитория: DEPLOY_SSH_KEY (приватный ключ CI), DEPLOY_KNOWN_HOSTS
+# (ssh-keyscan сервера); переменные DEPLOY_HOST (user@адрес VPS) и DEPLOY_PORT
+# (если SSH не на 22). Настройка — в
+# README репозитория infra.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  go:
+    runs-on: docker
+    container:
+      image: golang:1.26
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: lifeplan_test
+          POSTGRES_USER: lifeplan
+          POSTGRES_HOST_AUTH_METHOD: trust
+    env:
+      TEST_DATABASE_URL: postgres://lifeplan@postgres:5432/lifeplan_test?sslmode=disable
+      GOFLAGS: -mod=readonly
+    steps:
+      # checkout без JS-экшена: в образе golang нет node.
+      - name: checkout
+        run: |
+          git init -q .
+          server="${{ github.server_url }}"
+          git remote add origin "https://oauth2:${{ github.token }}@${server#https://}/${{ github.repository }}.git"
+          git fetch -q --depth 1 origin "${{ github.sha }}"
+          git checkout -q FETCH_HEAD
+      - name: postgres
+        run: |
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/postgres/5432) 2>/dev/null && exit 0
+            sleep 1
+          done
+          echo "postgres не поднялся"; exit 1
+      - name: gofmt
+        run: test -z "$(gofmt -l cmd internal)" || (gofmt -l cmd internal && false)
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test -p 1 ./...
+      - name: build
+        run: CGO_ENABLED=0 go build -trimpath -o /dev/null ./cmd/lifeplan ./cmd/plan
+
+  web:
+    runs-on: docker   # node:22-bookworm — образ по умолчанию у раннера
+    steps:
+      - uses: actions/checkout@v4
+      - run: node --check internal/web/static/app.js
+      - run: node --check internal/web/static/sw.js
+
+  deploy:
+    needs: [go, web]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: docker
+    steps:
+      - name: deploy
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          HOST: ${{ vars.DEPLOY_HOST }}         # kosovandrey@<ip>
+          PORT: ${{ vars.DEPLOY_PORT || '22' }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          # Ключ на сервере привязан к deploy.sh: команда — только «проект sha».
+          ssh -o BatchMode=yes -p "$PORT" "$HOST" "lifeplan ${{ github.sha }}"

@@ -180,6 +180,7 @@ type runner struct {
 	refs     map[string]string // $ref → uuid задачи
 	projRefs map[string]int    // $ref → id проекта
 	lines    []string
+	spheres  map[int]string // id → «иконка название», лениво
 }
 
 func run(ctx context.Context, st *store.Store, ops []Op, actor string) ([]string, map[string]string, error) {
@@ -227,7 +228,7 @@ func (r *runner) do(op Op) error {
 		if op.Ref != "" {
 			r.refs[op.Ref] = created.ID
 		}
-		r.add("+ %s", describe(created))
+		r.add("+ %s", describe(created, r.sphereLabel(created.SphereID)))
 
 	case "update":
 		id, err := r.id(op.ID)
@@ -542,12 +543,33 @@ func short(id string) string {
 }
 
 // describe — одна строка о задаче: вид, заголовок, когда, оценка, матрица.
-func describe(it domain.Item) string {
+// sphereLabel — «💪 Здоровье» для превью; сферы читаются один раз за план.
+func (r *runner) sphereLabel(id *int) string {
+	if id == nil {
+		return ""
+	}
+	if r.spheres == nil {
+		r.spheres = map[int]string{}
+		ss, err := r.st.AllSpheres(r.ctx)
+		if err != nil {
+			return ""
+		}
+		for _, sp := range ss {
+			r.spheres[sp.ID] = strings.TrimSpace(sp.Icon + " " + sp.Name)
+		}
+	}
+	return r.spheres[*id]
+}
+
+func describe(it domain.Item, sphere string) string {
 	parts := []string{}
 	if it.Kind != domain.KindTask {
 		parts = append(parts, string(it.Kind))
 	}
 	parts = append(parts, "«"+it.Title+"»")
+	if sphere != "" {
+		parts = append(parts, sphere)
+	}
 	switch {
 	case it.StartAt != nil:
 		w := fmtDay(*it.StartAt) + " " + it.StartAt.In(domain.MSK).Format("15:04")

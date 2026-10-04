@@ -194,6 +194,10 @@ const state = { spheres: [], sphereById: new Map() };
 
 async function loadRefs() {
   const [spheres, projects] = await Promise.all([api('GET', 'spheres'), api('GET', 'projects')]);
+  // В тёмной теме сфера берёт свой тёмный вариант цвета, если он задан.
+  if (matchMedia('(prefers-color-scheme: dark)').matches) {
+    for (const sp of spheres) if (sp.style && sp.style.color_dark) sp.color = sp.style.color_dark;
+  }
   state.spheres = spheres;
   state.sphereById = new Map(spheres.map((s) => [s.id, s]));
   state.projects = projects || [];

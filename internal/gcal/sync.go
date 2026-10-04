@@ -393,8 +393,8 @@ var googleColors = map[string]string{
 // defaultColors — сферам по умолчанию заданы попарно различные цвета: подбор
 // «ближайшего» склеил бы Работу с Учёбой (обе голубые).
 var defaultColors = map[string]string{
-	"work": "9", "career": "3", "study": "7", "product": "5",
-	"home": "2", "leisure": "4", "health": "11", "finance": "10",
+	"work": "9", "career": "7", "study": "1", "product": "11",
+	"home": "6", "leisure": "5", "health": "2",
 }
 
 // sphereColors: style.gcal_color (ручная настройка) → цвет по умолчанию → ближайший.

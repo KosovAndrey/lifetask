@@ -23,7 +23,7 @@ server {
     add_header Cross-Origin-Opener-Policy "same-origin" always;
     # CSP и nosniff выставляет само приложение.
 
-    client_max_body_size 2m;
+    client_max_body_size 60m;   # вложения до 50 МБ
 
     location / {
         proxy_pass         $lifeplan;
@@ -31,6 +31,6 @@ server {
         proxy_set_header   X-Real-IP $remote_addr;
         proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header   X-Forwarded-Proto $scheme;
-        proxy_read_timeout 60s;
+        proxy_read_timeout 180s;   # загрузка файла в Drive бывает долгой
     }
 }

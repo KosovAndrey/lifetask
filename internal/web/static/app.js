@@ -458,6 +458,7 @@ async function viewInbox() {
       h('div', { class: 'inbox-row card' },
         h('div', { class: 'text' },
           (m.transcript ? '🎤 ' + m.transcript : m.text),
+          (m.files || []).map((b) => fileBlock(b)),
           h('div', { class: 'when' }, `${shortDay(mskDate(m.created_at))} ${hm(m.created_at)} · ${statusLabel[m.status] || m.status}`),
           m.parse_error ? h('div', { class: 'err' }, 'не разобралось: ' + m.parse_error) : null),
         h('div', { class: 'acts' },
@@ -547,13 +548,56 @@ function renderBlocks(body, onChange) {
           h('tr', {}, (b.columns || []).map((c) => h('th', {}, c))),
           (b.rows || []).map((r) => h('tr', {}, r.map((c) => h('td', {}, c)))));
       case 'file':
-        return h('div', {}, '📎 ', b.name || 'файл');
+        return fileBlock(b, () => { body[idx] = { type: '_removed' }; onChange(); });
       case 'ref':
         return h('div', { class: 'blk-comment' }, '↗ связанная задача');
       default:
         return b.text ? md(b.text) : null;
     }
   }));
+}
+
+// ── Файлы ────────────────────────────────────────────────────────────────────
+
+function fileUrl(b) { return '/api/files/' + encodeURIComponent(b.file_id); }
+function fmtSize(n) {
+  if (n >= 1 << 20) return (n / (1 << 20)).toFixed(1).replace('.0', '') + ' МБ';
+  if (n >= 1024) return Math.round(n / 1024) + ' КБ';
+  return n + ' Б';
+}
+const IMAGE = /^image\/(png|jpeg|gif|webp)$/;
+
+// Вложение: картинка — превью, остальное — ссылка. onRemove — убрать из задачи
+// (сам файл остаётся в Drive: случайно убранное можно найти там).
+function fileBlock(b, onRemove) {
+  if (!b.file_id) return h('div', {}, '📎 ', b.name || 'файл');
+  const box = h('div', { class: 'blk-file' },
+    h('a', { href: fileUrl(b), target: '_blank', rel: 'noopener' },
+      IMAGE.test(b.mime || '') ? h('img', { src: fileUrl(b), alt: b.name || '', loading: 'lazy' }) : h('span', { class: 'ico' }, '📎'),
+      h('span', { class: 'name' }, b.name || 'файл'),
+      b.size ? h('span', { class: 'size' }, fmtSize(b.size)) : null),
+    onRemove ? h('button', { class: 'btn icon', type: 'button', title: 'Убрать из задачи', 'aria-label': `Убрать «${b.name}»`, onclick: () => {
+      if (!confirm(`Убрать «${b.name}» из задачи? Файл останется в Google Drive.`)) return;
+      box.remove();
+      onRemove();
+    } }, '×') : null);
+  return box;
+}
+
+// Загрузка — только при сети: файлы в офлайн-очередь не кладём (тяжёлые).
+async function uploadFiles(id, list) {
+  const fd = new FormData();
+  for (const f of list) fd.append('file', f, f.name || 'file');
+  let res;
+  try {
+    res = await fetch(`/api/items/${id}/files`, { method: 'POST', credentials: 'same-origin', headers: { 'X-Requested-With': 'lifetask' }, body: fd });
+  } catch {
+    throw new Error('файлы загружаются только при сети');
+  }
+  if (res.status === 401) throw new AuthError('нужен вход');
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error((data && data.error) || res.statusText);
+  return data;
 }
 
 function seg(options, value, onPick) {
@@ -692,6 +736,41 @@ async function openEditor(id, onDone, preset = {}) {
 
   // Без md-блока — даём поле для заметки (добавится при сохранении, если не пустое).
   if (!body.some((b) => b.type === 'md')) body.unshift({ type: 'md', text: '' });
+  const blocksEl = renderBlocks(body, () => (bodyChanged = true));
+
+  // Вложения: кнопка, перетаскивание, вставка из буфера. У новой задачи файлы
+  // ждут сохранения — загрузить их можно только к уже созданной.
+  const pending = [];
+  const pendingList = h('div', { class: 'pending-files' });
+  const attach = async (list) => {
+    list = [...list];
+    if (!list.length) return;
+    if (!id) {
+      pending.push(...list);
+      pendingList.replaceChildren(...pending.map((f) => h('div', {}, '📎 ', f.name, h('span', { class: 'size' }, ' — загрузится при сохранении'))));
+      return;
+    }
+    toast(`Загружаю: ${list.length}…`);
+    try {
+      const res = await uploadFiles(id, list);
+      const have = new Set(body.filter((b) => b.type === 'file').map((b) => b.file_id));
+      for (const b of (res && res.body) || []) {
+        if (b.type !== 'file' || have.has(b.file_id)) continue;
+        body.push(b);
+        blocksEl.append(fileBlock(b, () => { body[body.indexOf(b)] = { type: '_removed' }; bodyChanged = true; }));
+      }
+      toast(`📎 Прикреплено: ${list.length}`);
+      onDone && onDone();
+    } catch (err) { handleError(err); }
+  };
+  const fileInput = h('input', { type: 'file', multiple: true, hidden: true });
+  fileInput.addEventListener('change', () => { attach(fileInput.files); fileInput.value = ''; });
+  const dropZone = h('div', { class: 'dropzone' },
+    h('button', { class: 'btn', type: 'button', onclick: () => fileInput.click() }, '📎 Прикрепить файл'),
+    h('span', { class: 'hint' }, 'или перетащи сюда / вставь из буфера'), fileInput, pendingList);
+  dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('over'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('over'));
+  dropZone.addEventListener('drop', (e) => { e.preventDefault(); dropZone.classList.remove('over'); attach(e.dataTransfer.files); });
 
   const save = async () => {
     const patch = {};
@@ -721,7 +800,7 @@ async function openEditor(id, onDone, preset = {}) {
     if (weight.value !== '') set('weight', Number(weight.value));
     const tagList = tags.value.split(',').map((s) => s.trim()).filter(Boolean);
     if (JSON.stringify(tagList) !== JSON.stringify(base.tags || [])) patch.tags = tagList;
-    if (bodyChanged) patch.body = body.filter((b) => !(b.type === 'md' && !b.text.trim()));
+    if (bodyChanged) patch.body = body.filter((b) => b.type !== '_removed' && !(b.type === 'md' && !b.text.trim()));
     // Время сравниваем как моменты, а не строки (сервер отдаёт другое представление).
     for (const k of ['start_at', 'end_at', 'deadline']) {
       if (k in patch && patch[k] && base[k] && new Date(patch[k]).getTime() === new Date(base[k]).getTime()) delete patch[k];
@@ -757,7 +836,12 @@ async function openEditor(id, onDone, preset = {}) {
       if (id) {
         if (Object.keys(patch).length) await api('PATCH', `items/${id}`, patch);
       } else {
-        await api('POST', 'items', { ...patch, title: t, kind });
+        const created = await api('POST', 'items', { ...patch, title: t, kind });
+        if (pending.length) {
+          if (created && created.id) {
+            await uploadFiles(created.id, pending).catch((err) => toast('⚠️ Задача создана, файлы не загрузились: ' + err.message));
+          } else toast('Задача в очереди, а файлы без сети не загрузить — прикрепи позже');
+        }
       }
       closeSheet();
       onDone && onDone();
@@ -795,7 +879,8 @@ async function openEditor(id, onDone, preset = {}) {
       it.postpone_count ? h('div', { class: 'wide field' }, `Переносов: ${it.postpone_count}`) : null,
       it.recurrence_id ? h('div', { class: 'wide row field' }, '🔁 Экземпляр повтора: переносы не считаются', stopRepeat) : null,
       !id ? f('Повтор', repeat, 'wide') : null,
-      h('div', { class: 'wide' }, renderBlocks(body, () => (bodyChanged = true))),
+      h('div', { class: 'wide' }, blocksEl),
+      h('div', { class: 'wide' }, dropZone),
     ),
     subs,
     id ? relationsBlock(detail, () => openEditor(id, onDone)) : null,
@@ -807,6 +892,10 @@ async function openEditor(id, onDone, preset = {}) {
   ].filter(Boolean));
   $('sheet').hidden = false;
   $('sheet-backdrop').hidden = false;
+  $('sheet').onpaste = (e) => {
+    const list = [...(e.clipboardData && e.clipboardData.files) || []];
+    if (list.length) { e.preventDefault(); attach(list); }
+  };
   if (!id) title.focus();
 }
 
@@ -1375,6 +1464,110 @@ async function viewNotes() {
   ];
 }
 
+// ── Сферы (настройки) ────────────────────────────────────────────────────────
+
+// Цвета событий Google Календаря: номер → название и как они выглядят.
+const GCAL_COLORS = {
+  1: ['Лаванда', '#7986cb'], 2: ['Шалфей', '#33b679'], 3: ['Виноград', '#8e24aa'], 4: ['Фламинго', '#e67c73'],
+  5: ['Банан', '#f6bf26'], 6: ['Мандарин', '#f4511e'], 7: ['Павлин', '#039be5'], 8: ['Графит', '#616161'],
+  9: ['Черника', '#3f51b5'], 10: ['Базилик', '#0b8043'], 11: ['Томат', '#d50000'],
+};
+
+async function viewSpheres() {
+  const list = await api('GET', 'spheres?all=1');
+  const active = list.filter((s) => !s.archived);
+  const archived = list.filter((s) => s.archived);
+
+  // Каждое поле сохраняется сразу; справочник перечитается при следующем экране.
+  const save = async (sp, patch, rerender) => {
+    try {
+      Object.assign(sp, await api('PATCH', `spheres/${sp.id}`, patch));
+      state.spheres = [];
+      toast('Сохранено');
+      if (rerender) render();
+    } catch (err) { handleError(err); }
+  };
+  const move = async (i, dir) => {
+    const a = active[i], b = active[i + dir];
+    if (!b) return;
+    // Если порядок совпадал — разводим по индексам, иначе меняем местами.
+    const sa = a.sort === b.sort ? (i + dir) * 10 : b.sort, sb = a.sort === b.sort ? i * 10 : a.sort;
+    try {
+      await api('PATCH', `spheres/${a.id}`, { sort: sa });
+      await api('PATCH', `spheres/${b.id}`, { sort: sb });
+      state.spheres = [];
+      render();
+    } catch (err) { handleError(err); }
+  };
+
+  const card = (sp, i) => {
+    const st = sp.style || {};
+    const swatch = h('span', { class: 'swatch' });
+    const paint = () => {
+      swatch.style.setProperty('--light', sp.color);
+      swatch.style.setProperty('--dark', (sp.style && sp.style.color_dark) || sp.color);
+    };
+    paint();
+    const icon = h('input', { class: 'icon-input', value: sp.icon || '', maxlength: 8, 'aria-label': 'Иконка' });
+    icon.addEventListener('change', () => save(sp, { icon: icon.value.trim() }));
+    const name = h('input', { value: sp.name, maxlength: 40, 'aria-label': 'Название' });
+    name.addEventListener('change', () => name.value.trim() && save(sp, { name: name.value.trim() }));
+    const light = h('input', { type: 'color', value: sp.color.toLowerCase(), 'aria-label': 'Цвет в светлой теме' });
+    light.addEventListener('change', async () => { await save(sp, { color: light.value }); paint(); });
+    const dark = h('input', { type: 'color', value: (st.color_dark || sp.color).toLowerCase(), 'aria-label': 'Цвет в тёмной теме' });
+    dark.addEventListener('change', async () => { await save(sp, { color_dark: dark.value }); paint(); });
+    const gcal = h('select', { 'aria-label': 'Цвет в Google Календаре' },
+      h('option', { value: '' }, 'подобрать автоматически'),
+      Object.entries(GCAL_COLORS).map(([k, [n]]) => h('option', { value: k, selected: st.gcal_color === k }, n)));
+    const gdot = h('span', { class: 'gdot' });
+    const drawG = () => gdot.style.setProperty('background', gcal.value ? GCAL_COLORS[gcal.value][1] : 'transparent');
+    drawG();
+    gcal.addEventListener('change', () => { drawG(); save(sp, { gcal_color: gcal.value }); });
+    const hint = h('textarea', { rows: 2, maxlength: 300, placeholder: 'Что сюда относится — подсказка для разбора заметок ИИ' });
+    hint.value = st.hint || '';
+    hint.addEventListener('change', () => save(sp, { hint: hint.value }));
+
+    return h('div', { class: `sphere-card card${sp.archived ? ' archived' : ''}` },
+      h('div', { class: 'head' }, swatch, icon, name,
+        !sp.archived ? h('button', { class: 'btn icon', type: 'button', title: 'Выше', 'aria-label': 'Выше', disabled: i === 0, onclick: () => move(i, -1) }, '↑') : null,
+        !sp.archived ? h('button', { class: 'btn icon', type: 'button', title: 'Ниже', 'aria-label': 'Ниже', disabled: i === active.length - 1, onclick: () => move(i, 1) }, '↓') : null),
+      h('div', { class: 'grid' },
+        h('label', { class: 'field' }, 'Светлая тема', light),
+        h('label', { class: 'field' }, 'Тёмная тема', dark),
+        h('label', { class: 'field wide' }, 'Google Календарь', h('div', { class: 'row' }, gdot, gcal)),
+        h('label', { class: 'field wide' }, 'Подсказка для ИИ', hint)),
+      h('div', { class: 'actions' },
+        h('span', { class: 'slug' }, sp.slug),
+        h('span', { class: 'spacer' }),
+        h('button', { class: 'btn', type: 'button', onclick: () => {
+          if (!sp.archived && !confirm(`Убрать «${sp.name}» в архив? Задачи останутся, но без цвета сферы.`)) return;
+          save(sp, { archived: !sp.archived }, true);
+        } }, sp.archived ? 'Вернуть из архива' : 'В архив')));
+  };
+
+  const newName = h('input', { placeholder: 'Название', maxlength: 40, 'aria-label': 'Название новой сферы' });
+  const newIcon = h('input', { class: 'icon-input', placeholder: '✨', maxlength: 8, 'aria-label': 'Иконка новой сферы' });
+  const newColor = h('input', { type: 'color', value: '#6b7280', 'aria-label': 'Цвет новой сферы' });
+  const create = async () => {
+    if (!newName.value.trim()) return toast('Нужно название');
+    try {
+      await api('POST', 'spheres', { name: newName.value.trim(), icon: newIcon.value.trim(), color: newColor.value });
+      state.spheres = [];
+      render();
+    } catch (err) { handleError(err); }
+  };
+
+  return [
+    h('div', { class: 'bar' }, h('h1', {}, 'Сферы'),
+      h('div', { class: 'sub' }, 'Цвета, порядок и подсказки для разбора. Сохраняется сразу.')),
+    h('div', { class: 'spheres-list' }, active.map(card)),
+    h('div', { class: 'section' }, 'Новая сфера'),
+    h('div', { class: 'card new-sphere' }, h('div', { class: 'row' }, newIcon, newName, newColor,
+      h('button', { class: 'btn primary', type: 'button', onclick: create }, 'Добавить'))),
+    archived.length ? [h('div', { class: 'section' }, 'Архив'), h('div', { class: 'spheres-list' }, archived.map((sp) => card(sp, -1)))] : null,
+  ];
+}
+
 // ── Роутинг ──────────────────────────────────────────────────────────────────
 
 function go(hash) { location.hash = hash; }
@@ -1418,10 +1611,11 @@ async function render() {
       case 'graph': nodes = await viewGraph(); break;
       case 'journal': nodes = await viewJournal(arg || todayStr()); break;
       case 'notes': nodes = await viewNotes(); break;
+      case 'spheres': nodes = await viewSpheres(); break;
       default: nodes = await viewDay(arg || todayStr());
     }
     if (seq !== renderSeq) return; // пока грузили, пользователь ушёл на другой экран
-    $('fab').hidden = false;
+    $('fab').hidden = tab === 'spheres';
     // Вкладку подсвечиваем только после загрузки: без сети экран остаётся прежним.
     document.querySelectorAll('.tabs a').forEach((a) => a.classList.toggle('active', a.dataset.tab === tab));
     // На телефоне вкладки прокручиваются — активная должна быть видна.

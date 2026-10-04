@@ -66,7 +66,7 @@ type OAuth struct {
 func (o OAuth) AuthURL() string {
 	q := url.Values{
 		"client_id": {o.ClientID}, "redirect_uri": {RedirectURI}, "response_type": {"code"},
-		"scope": {ScopeCalendar + " " + ScopeTasks}, "access_type": {"offline"}, "prompt": {"consent"},
+		"scope": {ScopeCalendar + " " + ScopeTasks + " " + ScopeDrive}, "access_type": {"offline"}, "prompt": {"consent"},
 	}
 	return "https://accounts.google.com/o/oauth2/v2/auth?" + q.Encode()
 }

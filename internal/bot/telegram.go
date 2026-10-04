@@ -9,6 +9,8 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
+	"gitlab.com/KosovAndrey/lifeplan/internal/domain"
 )
 
 // Telegram — Messenger поверх Bot API (long polling: вебхук и домен не нужны).
@@ -124,6 +126,14 @@ func convert(u tgbotapi.Update) (Incoming, bool) {
 			in.ReplyTo = int64(m.ReplyToMessage.MessageID)
 		}
 		switch {
+		case len(m.Photo) > 0:
+			// Telegram присылает несколько размеров — берём самый крупный.
+			ph := m.Photo[len(m.Photo)-1]
+			in.File = &File{ID: ph.FileID, Name: "photo_" + time.Unix(int64(m.Date), 0).In(domain.MSK).Format("2006-01-02_15-04-05") + ".jpg", Mime: "image/jpeg"}
+		case m.Document != nil:
+			in.File = &File{ID: m.Document.FileID, Name: m.Document.FileName, Mime: m.Document.MimeType}
+		case m.Video != nil:
+			in.File = &File{ID: m.Video.FileID, Name: m.Video.FileName, Mime: m.Video.MimeType}
 		case m.Voice != nil:
 			in.VoiceID = m.Voice.FileID
 		case m.Audio != nil:

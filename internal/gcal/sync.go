@@ -390,11 +390,12 @@ var googleColors = map[string]string{
 	"7": "#039be5", "8": "#616161", "9": "#3f51b5", "10": "#0b8043", "11": "#d50000",
 }
 
-// defaultColors — сферам по умолчанию заданы попарно различные цвета: подбор
-// «ближайшего» склеил бы Работу с Учёбой (обе голубые).
+// defaultColors — цвет Google для стандартной палитры (миграция 008): подбор
+// «ближайшего» склеил бы Карьеру с Учёбой (обе голубые). Действует, пока цвет
+// сферы не меняли; поменяли — подбирается ближайший к новому.
 var defaultColors = map[string]string{
-	"work": "9", "career": "7", "study": "1", "product": "11",
-	"home": "5", "leisure": "6", "health": "2",
+	"#5451A4": "9", "#00C4C4": "7", "#006899": "1", "#993C23": "11",
+	"#7C5700": "5", "#E79551": "6", "#73C076": "2",
 }
 
 // sphereColors: style.gcal_color (ручная настройка) → цвет по умолчанию → ближайший.
@@ -407,7 +408,7 @@ func (s *Syncer) sphereColors(ctx context.Context) (map[int]string, error) {
 	for _, sp := range ss {
 		if c, ok := sp.Style["gcal_color"].(string); ok && googleColors[c] != "" {
 			out[sp.ID] = c
-		} else if c, ok := defaultColors[sp.Slug]; ok {
+		} else if c, ok := defaultColors[strings.ToUpper(sp.Color)]; ok {
 			out[sp.ID] = c
 		} else {
 			out[sp.ID] = NearestColor(sp.Color)

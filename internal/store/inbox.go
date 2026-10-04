@@ -13,12 +13,12 @@ import (
 	"gitlab.com/KosovAndrey/lifeplan/internal/domain"
 )
 
-const inboxCols = `id, text, transcript, parsed, parse_error, status, item_id, tg_message_id, bot_message_id, created_at`
+const inboxCols = `id, text, transcript, parsed, parse_error, status, item_id, tg_message_id, bot_message_id, created_at, files`
 
 func scanInbox(row pgx.Row) (domain.InboxMessage, error) {
 	var m domain.InboxMessage
 	err := row.Scan(&m.ID, &m.Text, &m.Transcript, &m.Parsed, &m.ParseError, &m.Status, &m.ItemID,
-		&m.TgMessageID, &m.BotMessageID, &m.CreatedAt)
+		&m.TgMessageID, &m.BotMessageID, &m.CreatedAt, &m.Files)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return m, ErrNotFound
 	}
@@ -33,8 +33,12 @@ func (s *Store) AddInbox(ctx context.Context, m domain.InboxMessage) (domain.Inb
 	if len(m.Parsed) > 0 {
 		parsed = string(m.Parsed)
 	}
-	return scanInbox(s.db.QueryRow(ctx, `INSERT INTO inbox_messages (text, transcript, parsed, tg_message_id)
-		VALUES ($1,$2,$3,$4) RETURNING `+inboxCols, m.Text, m.Transcript, parsed, m.TgMessageID))
+	files := m.Files
+	if files == nil {
+		files = []domain.Block{}
+	}
+	return scanInbox(s.db.QueryRow(ctx, `INSERT INTO inbox_messages (text, transcript, parsed, tg_message_id, files)
+		VALUES ($1,$2,$3,$4,$5) RETURNING `+inboxCols, m.Text, m.Transcript, parsed, m.TgMessageID, files))
 }
 
 func (s *Store) GetInbox(ctx context.Context, id string) (domain.InboxMessage, error) {
@@ -83,6 +87,9 @@ func (s *Store) ResolveInbox(ctx context.Context, id, status string, itemID *str
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	if status == "accepted" && itemID != nil {
+		return s.moveInboxFiles(ctx, id, *itemID)
 	}
 	return nil
 }

@@ -556,13 +556,22 @@ func (s *Store) TimeEntries(ctx context.Context, itemID string) ([]domain.TimeEn
 // ── Справочники ──────────────────────────────────────────────────────────────
 
 func (s *Store) Spheres(ctx context.Context) ([]domain.Sphere, error) {
-	rows, err := s.db.Query(ctx, `SELECT id, slug, name, color, icon, style FROM spheres WHERE NOT archived ORDER BY sort, id`)
+	return s.spheres(ctx, `WHERE NOT archived`)
+}
+
+// AllSpheres — вместе с архивными (для настроек).
+func (s *Store) AllSpheres(ctx context.Context) ([]domain.Sphere, error) {
+	return s.spheres(ctx, ``)
+}
+
+func (s *Store) spheres(ctx context.Context, where string) ([]domain.Sphere, error) {
+	rows, err := s.db.Query(ctx, `SELECT id, slug, name, color, icon, style, sort, archived FROM spheres `+where+` ORDER BY archived, sort, id`)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (domain.Sphere, error) {
 		var x domain.Sphere
-		err := r.Scan(&x.ID, &x.Slug, &x.Name, &x.Color, &x.Icon, &x.Style)
+		err := r.Scan(&x.ID, &x.Slug, &x.Name, &x.Color, &x.Icon, &x.Style, &x.Sort, &x.Archived)
 		return x, err
 	})
 }

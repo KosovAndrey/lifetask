@@ -14,6 +14,7 @@ import (
 
 	"gitlab.com/KosovAndrey/lifeplan/internal/changeplan"
 	"gitlab.com/KosovAndrey/lifeplan/internal/domain"
+	"gitlab.com/KosovAndrey/lifeplan/internal/files"
 	"gitlab.com/KosovAndrey/lifeplan/internal/parse"
 	"gitlab.com/KosovAndrey/lifeplan/internal/store"
 )
@@ -26,6 +27,8 @@ type API struct {
 	Static http.Handler
 	// Secure — cookie только по HTTPS (прод за nginx); в разработке false.
 	Secure bool
+	// Files — вложения (nil — загрузка выключена).
+	Files *files.Store
 }
 
 func New(st *store.Store, token string) *API {
@@ -46,6 +49,10 @@ func (a *API) Handler() http.Handler {
 	}
 
 	mux.HandleFunc("GET /api/spheres", a.spheres)
+	mux.HandleFunc("POST /api/spheres", a.createSphere)
+	mux.HandleFunc("PATCH /api/spheres/{id}", a.patchSphere)
+	mux.HandleFunc("POST /api/items/{id}/files", a.uploadFiles)
+	mux.HandleFunc("GET /api/files/{fid}", a.downloadFile)
 	mux.HandleFunc("GET /api/projects", a.projects)
 	mux.HandleFunc("GET /api/items", a.listItems)
 	mux.HandleFunc("POST /api/items", a.createItem)
@@ -237,7 +244,11 @@ func decode(r *http.Request, v any) error {
 }
 
 func (a *API) spheres(w http.ResponseWriter, r *http.Request) {
-	v, err := a.st.Spheres(r.Context())
+	list := a.st.Spheres
+	if r.URL.Query().Get("all") == "1" {
+		list = a.st.AllSpheres
+	}
+	v, err := list(r.Context())
 	if err != nil {
 		fail(w, err)
 		return

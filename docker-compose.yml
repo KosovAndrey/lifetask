@@ -12,6 +12,11 @@ services:
       DATABASE_URL: "postgres://lifeplan:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/lifeplan?sslmode=disable"
       LISTEN_ADDR: "0.0.0.0:8090"
       TZ: "Europe/Moscow"
+      FILES_DIR: /data/files      # вложения, если Google Drive не подключён
+      BACKUP_DIR: /backups        # дампы отсюда копируются в Google Drive
+    volumes:
+      - files:/data/files
+      - ./backups:/backups:ro
     ports:
       - "127.0.0.1:8090:8090"   # только локально: наружу — через nginx tryberry
     depends_on:
@@ -59,6 +64,7 @@ services:
 
 volumes:
   pgdata:
+  files:
 
 networks:
   tryberry:

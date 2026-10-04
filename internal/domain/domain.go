@@ -195,12 +195,14 @@ func (it *Item) Validate() error {
 }
 
 type Sphere struct {
-	ID    int            `json:"id"`
-	Slug  string         `json:"slug"`
-	Name  string         `json:"name"`
-	Color string         `json:"color"`
-	Icon  string         `json:"icon"`
-	Style map[string]any `json:"style"`
+	ID       int            `json:"id"`
+	Slug     string         `json:"slug"`
+	Name     string         `json:"name"`
+	Color    string         `json:"color"`
+	Icon     string         `json:"icon"`
+	Style    map[string]any `json:"style"` // color_dark, gcal_color, hint
+	Sort     int            `json:"sort"`
+	Archived bool           `json:"archived,omitempty"`
 }
 
 type Project struct {
@@ -238,6 +240,7 @@ type InboxMessage struct {
 	TgMessageID  *int64          `json:"tg_message_id,omitempty"`
 	BotMessageID *int64          `json:"bot_message_id,omitempty"`
 	CreatedAt    time.Time       `json:"created_at"`
+	Files        []Block         `json:"files,omitempty"` // вложения: переедут в задачу при принятии
 }
 
 // Content — что пришло: текст или расшифровка голоса.

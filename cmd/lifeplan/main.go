@@ -9,6 +9,8 @@
 // Бот (необязательно): TG_TOKEN, TG_OWNER_ID, ANTHROPIC_API_KEY, GROQ_API_KEY;
 // AI_PROXY_URL — прокси для Anthropic/Groq (из РФ напрямую недоступны), TG_PROXY_URL — для Telegram.
 // Google (необязательно): GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_PROXY_URL; refresh-токен — в БД после google-auth.
+// Файлы: в Google Drive (папка LifeTask), без Drive — в FILES_DIR (по умолчанию ./files).
+// BACKUP_DIR — откуда брать дампы базы для копии в Drive (в docker: /backups).
 package main
 
 import (
@@ -33,6 +35,7 @@ import (
 	"gitlab.com/KosovAndrey/lifeplan/internal/api"
 	"gitlab.com/KosovAndrey/lifeplan/internal/bot"
 	"gitlab.com/KosovAndrey/lifeplan/internal/domain"
+	"gitlab.com/KosovAndrey/lifeplan/internal/files"
 	"gitlab.com/KosovAndrey/lifeplan/internal/gcal"
 	"gitlab.com/KosovAndrey/lifeplan/internal/migrate"
 	"gitlab.com/KosovAndrey/lifeplan/internal/parse"
@@ -98,15 +101,18 @@ func serve(ctx context.Context, pool *pgxpool.Pool) error {
 	st := store.New(pool)
 	publicURL := strings.TrimRight(os.Getenv("PUBLIC_URL"), "/")
 	go runRecurrences(ctx, st)
-	if err := startGoogle(ctx, st); err != nil {
+	g, err := startGoogle(ctx, st)
+	if err != nil {
 		return err
 	}
-	if err := startBot(ctx, st, publicURL); err != nil {
+	fs := startFiles(ctx, g)
+	if err := startBot(ctx, st, publicURL, fs); err != nil {
 		return err
 	}
 	a := api.New(st, token)
 	a.Static = web.Handler()
 	a.Secure = strings.HasPrefix(publicURL, "https://")
+	a.Files = fs
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           a.Handler(),
@@ -140,7 +146,7 @@ func serve(ctx context.Context, pool *pgxpool.Pool) error {
 
 // startBot поднимает Telegram-бота и брифы, если задан TG_TOKEN. Без ключей ИИ
 // бот всё равно работает — просто складывает всё во входящие до вечера.
-func startBot(ctx context.Context, st *store.Store, publicURL string) error {
+func startBot(ctx context.Context, st *store.Store, publicURL string, fs *files.Store) error {
 	tgToken := os.Getenv("TG_TOKEN")
 	if tgToken == "" {
 		slog.Info("TG_TOKEN не задан — бот выключен")
@@ -172,6 +178,7 @@ func startBot(ctx context.Context, st *store.Store, publicURL string) error {
 	}
 	b := bot.New(st, tg, owner, parser, tr)
 	b.PublicURL = publicURL
+	b.Files = fs
 	go tg.Run(ctx, b)
 	go b.RunBriefs(ctx)
 	slog.Info("бот", "owner_set", owner != 0, "parser", parser != nil, "voice", tr != nil)
@@ -252,21 +259,53 @@ func googleAuth(ctx context.Context, st *store.Store) error {
 	return nil
 }
 
-func startGoogle(ctx context.Context, st *store.Store) error {
+// startGoogle запускает синк календаря и задач; возвращает клиент (nil — Google выключен).
+func startGoogle(ctx context.Context, st *store.Store) (*gcal.Google, error) {
 	o, err := googleOAuth()
 	if err != nil {
 		slog.Info("Google выключен", "reason", err.Error())
-		return nil
+		return nil, nil
 	}
 	refresh, err := st.KVGet(ctx, kvGoogleRefresh)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if refresh == "" {
 		slog.Info("Google: нет доступа — выполни `lifeplan google-auth`")
-		return nil
+		return nil, nil
 	}
-	go gcal.NewSyncer(st, gcal.NewGoogle(o, refresh)).Run(ctx, 5*time.Minute)
+	g := gcal.NewGoogle(o, refresh)
+	go gcal.NewSyncer(st, g).Run(ctx, 5*time.Minute)
 	slog.Info("Google: синк каждые 5 минут")
-	return nil
+	return g, nil
+}
+
+// startFiles — хранилище вложений; с Google — ещё и копия бэкапов в Drive.
+func startFiles(ctx context.Context, g *gcal.Google) *files.Store {
+	dir := os.Getenv("FILES_DIR")
+	if dir == "" {
+		dir = "files"
+	}
+	if g == nil {
+		slog.Info("файлы: на диске", "dir", dir)
+		return files.New(dir, nil)
+	}
+	fs := files.New(dir, driveAdapter{g})
+	if bdir := os.Getenv("BACKUP_DIR"); bdir != "" {
+		go fs.RunBackups(ctx, bdir, 6*time.Hour)
+	}
+	slog.Info("файлы: Google Drive", "fallback_dir", dir, "backups", os.Getenv("BACKUP_DIR") != "")
+	return fs
+}
+
+// driveAdapter приводит список файлов gcal к типу files (пакеты не зависят друг от друга).
+type driveAdapter struct{ *gcal.Google }
+
+func (d driveAdapter) DriveList(ctx context.Context, folder string) ([]files.DriveFileInfo, error) {
+	list, err := d.Google.DriveList(ctx, folder)
+	out := make([]files.DriveFileInfo, len(list))
+	for i, f := range list {
+		out[i] = files.DriveFileInfo{ID: f.ID, Name: f.Name}
+	}
+	return out, err
 }

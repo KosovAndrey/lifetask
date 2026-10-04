@@ -15,6 +15,7 @@ import (
 
 	"gitlab.com/KosovAndrey/lifeplan/internal/changeplan"
 	"gitlab.com/KosovAndrey/lifeplan/internal/domain"
+	"gitlab.com/KosovAndrey/lifeplan/internal/files"
 	"gitlab.com/KosovAndrey/lifeplan/internal/parse"
 	"gitlab.com/KosovAndrey/lifeplan/internal/render"
 	"gitlab.com/KosovAndrey/lifeplan/internal/store"
@@ -33,6 +34,11 @@ type Messenger interface {
 	Download(fileID string) ([]byte, error)
 }
 
+// File — вложение из Telegram.
+type File struct {
+	ID, Name, Mime string
+}
+
 // Incoming — апдейт Telegram в нужном боту виде.
 type Incoming struct {
 	ChatID    int64
@@ -40,6 +46,7 @@ type Incoming struct {
 	Text      string
 	ReplyTo   int64 // id сообщения, на которое ответили
 	VoiceID   string
+	File      *File // фото или документ
 
 	CallbackID    string
 	CallbackData  string
@@ -55,7 +62,8 @@ type Bot struct {
 	owner  int64
 	now    func() time.Time
 
-	PublicURL string // для /login: ссылка на веб
+	PublicURL string       // для /login: ссылка на веб
+	Files     *files.Store // nil — файлы не принимаются
 }
 
 func New(st *store.Store, m Messenger, owner int64, parser parse.Parser, tr stt.Transcriber) *Bot {
@@ -75,6 +83,8 @@ func (b *Bot) Handle(ctx context.Context, in Incoming) {
 	switch {
 	case in.CallbackID != "":
 		err = b.onCallback(ctx, in)
+	case in.File != nil:
+		err = b.onFile(ctx, in)
 	case in.VoiceID != "":
 		err = b.onVoice(ctx, in)
 	case strings.HasPrefix(in.Text, "/"):
@@ -128,6 +138,68 @@ func (b *Bot) onVoice(ctx context.Context, in Incoming) error {
 		return err
 	}
 	return b.process(ctx, m, nil, "🎤 «"+text+"»\n\n")
+}
+
+// onFile: ответ файлом на карточку — вложение к её задаче (или к заметке, пока
+// карточка не принята). Иначе — новая заметка: подпись разбирается как текст,
+// без подписи файл ждёт во входящих, что это (ответом на карточку).
+func (b *Bot) onFile(ctx context.Context, in Incoming) error {
+	if b.Files == nil {
+		return errors.New("хранилище файлов не настроено")
+	}
+	data, err := b.m.Download(in.File.ID)
+	if err != nil {
+		return fmt.Errorf("не скачал файл (боту доступны файлы до 20 МБ): %w", err)
+	}
+	block, err := b.Files.Put(ctx, in.File.Name, in.File.Mime, data)
+	if err != nil {
+		return err
+	}
+	name, _ := block["name"].(string)
+
+	if in.ReplyTo != 0 {
+		m, err := b.st.InboxByBotMessage(ctx, in.ReplyTo)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			// не карточка — новая заметка
+		case err != nil:
+			return err
+		case m.Status == "accepted" && m.ItemID != nil:
+			var it domain.Item
+			err := b.st.InTx(ctx, func(tx *store.Store) error {
+				var err error
+				it, err = tx.AttachFiles(ctx, *m.ItemID, []domain.Block{block}, "bot")
+				return err
+			})
+			if err != nil {
+				return err
+			}
+			b.send(in.ChatID, "📎 Прикрепил «"+name+"» к «"+it.Title+"».", nil)
+			return nil
+		case m.Status != "rejected":
+			if err := b.st.AddInboxFile(ctx, m.ID, block); err != nil {
+				return err
+			}
+			b.send(in.ChatID, "📎 «"+name+"» приложу к задаче, когда примешь карточку.", nil)
+			return nil
+		}
+	}
+
+	tgID := in.MessageID
+	text := strings.TrimSpace(in.Text)
+	if text == "" {
+		m, err := b.st.AddInbox(ctx, domain.InboxMessage{Text: "📎 " + name, TgMessageID: &tgID, Files: []domain.Block{block}})
+		if err != nil {
+			return err
+		}
+		id := b.send(b.owner, "📎 «"+name+"» во входящих.\n\n↩ Ответь на это сообщение, что это за файл или к какой задаче, — оформлю.", nil)
+		return b.st.SaveParse(ctx, m.ID, nil, nil, &id, "new")
+	}
+	m, err := b.st.AddInbox(ctx, domain.InboxMessage{Text: text, TgMessageID: &tgID, Files: []domain.Block{block}})
+	if err != nil {
+		return err
+	}
+	return b.process(ctx, m, nil, "📎 "+name+"\n")
 }
 
 // onReply — ответ на карточку = уточнение разбора. Ответ на что-то другое — новая заметка.

@@ -100,6 +100,9 @@ func (c *Claude) Parse(ctx context.Context, in Input) (Result, error) {
 		prev, _ := json.Marshal(in.Previous)
 		fmt.Fprintf(&user, "Предыдущий разбор этой заметки: %s\nПользователь уточнил — исправь разбор с учётом уточнения.\n", prev)
 	}
+	if extra := sphereHints(in.Spheres); extra != "" {
+		user.WriteString(extra)
+	}
 	fmt.Fprintf(&user, "Заметка:\n%s", in.Text)
 
 	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
@@ -130,6 +133,31 @@ func (c *Claude) Parse(ctx context.Context, in Input) (Result, error) {
 		}
 	}
 	return Result{}, errors.New("пустой ответ модели")
+}
+
+// builtinSpheres — сферы, описанные в systemPrompt.
+var builtinSpheres = map[string]bool{"work": true, "career": true, "study": true, "product": true,
+	"home": true, "leisure": true, "health": true}
+
+// sphereHints — то, что настроено в вебе: новые сферы и подсказки к сферам.
+// Идёт в сообщение, а не в системный промпт, чтобы тот оставался неизменным (кеш).
+func sphereHints(spheres []domain.Sphere) string {
+	var b strings.Builder
+	for _, sp := range spheres {
+		hint, _ := sp.Style["hint"].(string)
+		if builtinSpheres[sp.Slug] && hint == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "- %s — %s", sp.Slug, sp.Name)
+		if hint != "" {
+			b.WriteString(": " + hint)
+		}
+		b.WriteString("\n")
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return "Дополнительно о сферах (важнее описания выше):\n" + b.String()
 }
 
 var weekdayRU = [...]string{"воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота"}

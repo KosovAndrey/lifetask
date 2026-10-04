@@ -53,10 +53,11 @@ Anthropic и Groq с российских IP не отвечают, поэтом
 `pt_xray:8888` из tryberry: контейнер `app` подключён к сети tryberry только ради этого.
 Проверка: отправь боту заметку. Если карточка пришла, прокси работает. Если пришло «Записал, но разобрать не вышло», смотри `docker compose logs app | grep parse`.
 
-## Google Calendar и Tasks
+## Google Calendar, Tasks и Drive
 
 1. В `.env` впиши `GOOGLE_CLIENT_ID` и `GOOGLE_CLIENT_SECRET` (те же, что у tryberry) и выполни `docker compose up -d app`.
 2. Проверь в Google Cloud Console → *OAuth consent screen*: статус должен быть **In production**. В статусе *Testing* refresh-токен живёт 7 дней.
+   Там же в *APIs & Services → Library* включи **Google Calendar API**, **Google Tasks API** и **Google Drive API** (Drive у tryberry, скорее всего, выключен).
 3. Выдай доступ:
    ```bash
    docker compose exec -it app lifeplan google-auth
@@ -67,7 +68,11 @@ Anthropic и Groq с российских IP не отвечают, поэтом
 Что синхронизируется:
 - в Google Calendar создаётся календарь **LifeTask**. В него попадают задачи и события со временем, цвет зависит от сферы. Перенос, переименование и удаление в Google подтягиваются обратно (удаление = отмена задачи);
 - **основной календарь** зеркалится к нам на 2 недели вперёд (только чтение): встречи, добавленные руками, видны в дне и брифах;
-- в Google Tasks создаётся список **«Срочно»**. Что туда добавишь, уходит во входящие, а в Google отмечается выполненным.
+- в Google Tasks создаётся список **«Срочно»**. Что туда добавишь, уходит во входящие, а в Google отмечается выполненным;
+- в Google Drive создаётся папка **LifeTask**: в `Вложения` — файлы задач (из веба и из бота), в `Бэкапы` — копии дампов базы.
+  Доступ `drive.file`: приложение видит только свои файлы, остальной Drive ему недоступен.
+
+Без Google (или если Drive не ответил) файлы ложатся в том `files` на VPS и открываются так же.
 
 ## CLI для разборов с ноутбука
 
@@ -88,4 +93,7 @@ LIFEPLAN_TOKEN=<API_TOKEN с VPS>
 ## Бэкапы
 
 `lp_backup` каждый день кладёт дамп в `./backups` (14 дней, 8 недель, 12 месяцев).
-Выгрузка в Google Drive появится вместе с интеграцией Google.
+С подключённым Google приложение раз в 6 часов копирует свежий дамп в Drive (`LifeTask/Бэкапы`, последние 30).
+В логах: `бэкап в Drive file=…`.
+
+Восстановление — в пустую базу (свежий том `pgdata`): `gunzip -c <дамп>.sql.gz | docker compose exec -T postgres psql -U lifeplan lifeplan`.

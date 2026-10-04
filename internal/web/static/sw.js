@@ -1,6 +1,6 @@
 // Сервис-воркер LifeTask: оболочка и последние ответы API доступны без сети.
 // Запись офлайн копит сама страница (IndexedDB) — здесь только чтение.
-const SHELL = 'lp-shell-v1';
+const SHELL = 'lp-shell-v2';
 const API = 'lp-api-v1';
 const SHELL_FILES = ['/', '/index.html', '/app.js', '/style.css', '/manifest.webmanifest', '/icon.svg', '/icon-180.png', '/icon-512.png'];
 
@@ -19,6 +19,9 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   const url = new URL(req.url);
   if (req.method !== 'GET' || url.origin !== location.origin || url.pathname === '/login') return;
+
+  // Вложения не кешируем здесь: они тяжёлые, а браузер и так держит их по Cache-Control.
+  if (url.pathname.startsWith('/api/files/')) return;
 
   if (url.pathname.startsWith('/api/')) {
     e.respondWith(fetch(req).then((res) => {

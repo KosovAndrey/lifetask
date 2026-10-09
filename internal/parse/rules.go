@@ -242,6 +242,9 @@ func (s *scan) timeLog() (int, []int) {
 	return int(total + 0.5), m
 }
 
+// BestMatch — задача из cands, больше всего похожая на текст по основам слов (nil — нет похожих).
+func BestMatch(text string, cands []Candidate) *string { return bestCandidate(text, cands) }
+
 // bestCandidate — задача, у которой больше всего общих основ слов с текстом.
 func bestCandidate(text string, cands []Candidate) *string {
 	words := stems(text)

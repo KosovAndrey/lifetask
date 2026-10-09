@@ -30,6 +30,9 @@ func (b *Bot) RunBriefs(ctx context.Context) {
 		if err := b.briefTick(ctx); err != nil {
 			slog.Error("brief", "err", err)
 		}
+		if err := b.remindTick(ctx); err != nil {
+			slog.Error("remind", "err", err)
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -96,10 +99,11 @@ func (b *Bot) composeBrief(ctx context.Context, d domain.Date, kind string) (str
 	if kind == "weekly" {
 		return b.composeWeekly(ctx, d)
 	}
-	day, err := b.st.Day(ctx, d)
+	plan, err := b.st.Plan(ctx, d)
 	if err != nil {
 		return "", err
 	}
+	day := plan.Day
 	o, err := b.opts(ctx)
 	if err != nil {
 		return "", err
@@ -111,7 +115,15 @@ func (b *Bot) composeBrief(ctx context.Context, d domain.Date, kind string) (str
 	} else {
 		sb.WriteString("☀️ Сегодня, " + label + "\n\n")
 	}
+	if kind == "morning" {
+		if l := healthLine(plan.Health); l != "" {
+			sb.WriteString(l + "\n\n")
+		}
+	}
 	sb.WriteString(render.Day(day, false, o))
+	if l := loadLine(plan); l != "" {
+		sb.WriteString("\n" + l + "\n")
+	}
 
 	// Хвосты: утром — незакрытое с прошлых дней; вечером — ещё и то, что
 	// было на сегодня и не сделано (оно станет просрочкой завтра).

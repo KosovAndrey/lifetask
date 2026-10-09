@@ -81,6 +81,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/plans/{id}", a.getPlan)
 	mux.HandleFunc("POST /api/plans/{id}/apply", a.applyPlan)
 	mux.HandleFunc("POST /api/plans/{id}/reject", a.rejectPlan)
+	a.planningRoutes(mux)
 	return a.auth(a.idempotent(mux))
 }
 

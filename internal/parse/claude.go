@@ -17,10 +17,16 @@ import (
 )
 
 // Model — дешёвая быстрая модель: разбор короткой заметки не требует большего.
-const Model = "claude-haiku-4-5"
+const Model = "claude-haiku-5-5"
+
+// Effort — сколько модели думать. У Haiku 5.5 thinking включён всегда; low хватает
+// на даты и повторы, а думать дольше — дороже и медленнее карточки в боте.
+const Effort = anthropic.OutputConfigEffortLow
 
 type Claude struct {
 	client anthropic.Client
+	model  string
+	effort anthropic.OutputConfigEffort
 }
 
 // NewClaude: httpClient — с прокси, если API недоступен напрямую (VPS в РФ).
@@ -30,7 +36,7 @@ func NewClaude(apiKey string, httpClient *http.Client) *Claude {
 	if httpClient != nil {
 		opts = append(opts, option.WithHTTPClient(httpClient))
 	}
-	return &Claude{client: anthropic.NewClient(opts...)}
+	return &Claude{client: anthropic.NewClient(opts...), model: Model, effort: Effort}
 }
 
 func nullable(t string, desc string) map[string]any {
@@ -106,11 +112,13 @@ func (c *Claude) Parse(ctx context.Context, in Input) (Result, error) {
 	fmt.Fprintf(&user, "Заметка:\n%s", in.Text)
 
 	resp, err := c.client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model:     Model,
-		MaxTokens: 1024,
+		Model: c.model,
+		// Запас под thinking: ответ — JSON на пару сотен токенов, остальное съест размышление.
+		MaxTokens: 4096,
 		System:    []anthropic.TextBlockParam{{Text: systemPrompt}},
 		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(user.String()))},
 		OutputConfig: anthropic.OutputConfigParam{
+			Effort: c.effort,
 			Format: anthropic.JSONOutputFormatParam{Schema: schema(in.Spheres)},
 		},
 	})

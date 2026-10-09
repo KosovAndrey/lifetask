@@ -31,7 +31,8 @@ func TestClaudeRequestAndResponse(t *testing.T) {
 		})
 		resp, _ := json.Marshal(map[string]any{
 			"id": "msg_1", "type": "message", "role": "assistant", "model": Model, "stop_reason": "end_turn",
-			"content": []map[string]any{{"type": "text", "text": string(answer)}},
+			// Haiku 5.5 думает всегда: ответ начинается с thinking-блока (текст скрыт).
+			"content": []map[string]any{{"type": "thinking", "thinking": "", "signature": "sig"}, {"type": "text", "text": string(answer)}},
 			"usage":   map[string]any{"input_tokens": 10, "output_tokens": 10},
 		})
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}},
@@ -51,6 +52,14 @@ func TestClaudeRequestAndResponse(t *testing.T) {
 
 	if body["model"] != Model {
 		t.Fatalf("model: %v", body["model"])
+	}
+	if body["output_config"].(map[string]any)["effort"] != "low" {
+		t.Fatalf("effort: %v", body["output_config"])
+	}
+	for _, k := range []string{"temperature", "top_p", "top_k", "thinking"} {
+		if _, ok := body[k]; ok {
+			t.Fatalf("%s в запросе: Haiku 5.5 отвечает на него 400", k)
+		}
 	}
 	format := body["output_config"].(map[string]any)["format"].(map[string]any)
 	if format["type"] != "json_schema" {

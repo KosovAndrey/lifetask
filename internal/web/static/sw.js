@@ -1,8 +1,8 @@
 // Сервис-воркер LifeTask: оболочка и последние ответы API доступны без сети.
 // Запись офлайн копит сама страница (IndexedDB) — здесь только чтение.
-const SHELL = 'lp-shell-v3';
+const SHELL = 'lp-shell-v4';
 const API = 'lp-api-v1';
-const SHELL_FILES = ['/', '/index.html', '/app.js', '/queue.mjs', '/style.css', '/manifest.webmanifest', '/icon.svg', '/icon-180.png', '/icon-512.png'];
+const SHELL_FILES = ['/', '/index.html', '/app.js', '/queue.mjs', '/shell.mjs', '/style.css', '/manifest.webmanifest', '/icon.svg', '/icon-180.png', '/icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(SHELL).then((c) => c.addAll(SHELL_FILES)).then(() => self.skipWaiting()));

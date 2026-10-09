@@ -157,3 +157,26 @@ curl --fail http://127.0.0.1:8090/readyz
 Вложения `d:…` остаются в `LifeTask/Вложения` в прежнем Google-аккаунте и требуют
 доступа к нему. Google-токены возвращаются с дампом; если доступ отозван,
 повтори `docker compose exec -it app lifeplan google-auth` и перезапусти `app`.
+
+## Garmin: сон, Body Battery, стресс, шаги
+
+`deploy/garmin_sync.py` раз в час забирает из Garmin Connect сводку дня и сон
+(библиотека `garminconnect`, неофициальный API) и отправляет в `PUT /api/health/{дата}`.
+Данные видны в «Сегодня», дневнике, аналитике и утреннем брифе. Пустые поля
+сервер не затирает, так что повторные запуски безопасны.
+
+```bash
+python3 -m venv ~/garmin && ~/garmin/bin/pip install garminconnect
+# Первый вход: спросит код, если включена двухфакторная защита; токены лягут в ~/.garminconnect
+GARMIN_EMAIL=… GARMIN_PASSWORD=… ~/garmin/bin/python deploy/garmin_sync.py --login --dry-run
+```
+
+Cron (пароль больше не нужен, хватает токенов; `TZ` — как на часах):
+
+```
+5 * * * * cd ~/lifeplan && TZ=Europe/Moscow LIFETASK_URL=https://lifetask.ru API_TOKEN=… ~/garmin/bin/python deploy/garmin_sync.py >> ~/garmin/sync.log 2>&1
+```
+
+Если Garmin недоступен с VPS напрямую — добавь `HTTPS_PROXY=…`. Токены Garmin
+живут около года; когда протухнут, в логе будет ошибка входа — повтори `--login`.
+Тесты без сети: `python3 deploy/garmin_sync_test.py`.

@@ -26,6 +26,15 @@ type Stats struct {
 	Days         []DayStat  `json:"days"`
 	TotalMinutes int        `json:"total_minutes"`
 	Prev         PrevPeriod `json:"prev"`
+
+	// Здоровье и настроение по дням — чтобы видеть, как сон влияет на сделанное.
+	Health []HealthDay `json:"health"`
+	Moods  []DayMood   `json:"moods"`
+}
+
+type DayMood struct {
+	Date domain.Date `json:"date"`
+	Mood int         `json:"mood"`
 }
 
 // DayStat — день периода: сделано/создано и выполнение плана. План дня = задачи с
@@ -129,6 +138,23 @@ func (s *Store) Stats(ctx context.Context, from, to domain.Date) (Stats, error) 
 	}
 	for _, d := range st.Days {
 		st.TotalMinutes += d.Minutes
+	}
+	if st.Health, err = s.Health(ctx, from, to); err != nil {
+		return st, err
+	}
+	rows, err = s.db.Query(ctx, `SELECT date, mood FROM journal_days WHERE mood IS NOT NULL AND date >= $1 AND date < $2 ORDER BY date`,
+		from.String(), to.String())
+	if err != nil {
+		return st, err
+	}
+	if st.Moods, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (DayMood, error) {
+		var x DayMood
+		var d time.Time
+		err := r.Scan(&d, &x.Mood)
+		x.Date = *toDate(&d)
+		return x, err
+	}); err != nil {
+		return st, err
 	}
 	// Прошлый период той же длины — для дельт в плитках.
 	n := int(to.Sub(from.Time).Hours()/24 + 0.5)

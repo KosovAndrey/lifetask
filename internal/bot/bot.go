@@ -330,6 +330,9 @@ func (b *Bot) onCallback(ctx context.Context, in Incoming) error {
 		}
 		return b.m.AnswerCallback(in.CallbackID, "настроение записано "+moods[mood])
 	}
+	if ok, err := b.onItemCallback(ctx, in, action, id); ok {
+		return err
+	}
 	m, err := b.st.GetInbox(ctx, id)
 	if err != nil {
 		_ = b.m.AnswerCallback(in.CallbackID, "не нашёл")
@@ -386,13 +389,18 @@ const help = `Пиши или наговаривай что угодно — з�
 /today — сегодня
 /tomorrow — завтра
 /inbox — что ждёт разбора
+/timer — таймер: что идёт или над чем начать
+/go текст — запустить таймер на задаче
+/stop — остановить таймер и записать время
 /d текст — запись в дневник
 /login — ссылка для входа в веб`
 
 func (b *Bot) onCommand(ctx context.Context, in Incoming) error {
-	cmd, _, _ := strings.Cut(strings.TrimSpace(in.Text), " ")
+	cmd, arg, _ := strings.Cut(strings.TrimSpace(in.Text), " ")
 	cmd, _, _ = strings.Cut(cmd, "@") // /today@lifetask_bot в группах
 	switch cmd {
+	case "/timer", "/t", "/go", "/stop":
+		return b.onTimerCommand(ctx, cmd, arg)
 	case "/start", "/help":
 		b.send(in.ChatID, help, nil)
 	case "/today", "/tomorrow":

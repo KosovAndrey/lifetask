@@ -29,6 +29,7 @@ type DBTX interface {
 type Store struct {
 	pool *pgxpool.Pool
 	db   DBTX
+	tx   pgx.Tx
 }
 
 func New(pool *pgxpool.Pool) *Store { return &Store{pool: pool, db: pool} }
@@ -39,10 +40,12 @@ func (s *Store) Raw() DBTX { return s.db }
 // InTx выполняет fn в транзакции; Store внутри fn пишет в неё.
 func (s *Store) InTx(ctx context.Context, fn func(*Store) error) error {
 	if s.pool == nil {
-		return fn(s) // уже внутри транзакции
+		return pgx.BeginFunc(ctx, s.tx, func(tx pgx.Tx) error {
+			return fn(&Store{db: tx, tx: tx})
+		})
 	}
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		return fn(&Store{db: tx})
+		return fn(&Store{db: tx, tx: tx})
 	})
 }
 
@@ -120,6 +123,15 @@ func (s *Store) GetItem(ctx context.Context, id string) (domain.Item, error) {
 
 // CreateItem проставляет дефолты, валидирует и пишет задачу.
 func (s *Store) CreateItem(ctx context.Context, it domain.Item, actor string) (domain.Item, error) {
+	if s.pool != nil {
+		var out domain.Item
+		err := s.InTx(ctx, func(tx *Store) error {
+			var err error
+			out, err = tx.CreateItem(ctx, it, actor)
+			return err
+		})
+		return out, err
+	}
 	if it.Kind == "" {
 		it.Kind = domain.KindTask
 	}
@@ -183,6 +195,15 @@ var patchable = map[string]string{
 // UpdateItem применяет патч: декодирует его поверх текущей задачи (валидация
 // целиком), пишет в БД, журналирует каждое изменённое поле и считает переносы.
 func (s *Store) UpdateItem(ctx context.Context, id string, p Patch, actor string) (domain.Item, error) {
+	if s.pool != nil {
+		var out domain.Item
+		err := s.InTx(ctx, func(tx *Store) error {
+			var err error
+			out, err = tx.UpdateItem(ctx, id, p, actor)
+			return err
+		})
+		return out, err
+	}
 	cur, err := s.getForUpdate(ctx, id)
 	if err != nil {
 		return cur, err
@@ -230,7 +251,8 @@ func (s *Store) UpdateItem(ctx context.Context, id string, p Patch, actor string
 
 	_, err = s.db.Exec(ctx, `UPDATE items SET kind=$2, title=$3, body=$4, props=$5, sphere_id=$6, project_id=$7,
 		parent_id=$8, status=$9, important=$10, urgent=$11, planned_date=$12, start_at=$13, end_at=$14,
-		deadline=$15, estimate_min=$16, weight=$17, postpone_count=$18, done_at=$19, updated_at=now()
+		deadline=$15, estimate_min=$16, weight=$17, postpone_count=$18, done_at=$19,
+		updated_at=GREATEST(clock_timestamp(), updated_at + interval '1 microsecond')
 		WHERE id=$1`,
 		id, next.Kind, next.Title, next.Body, next.Props, next.SphereID, next.ProjectID, next.ParentID,
 		next.Status, next.Important, next.Urgent, dateArg(next.PlannedDate), next.StartAt, next.EndAt,

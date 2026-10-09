@@ -103,17 +103,53 @@ func (s *Store) SyncedByID(ctx context.Context, id string) (*SyncedItem, error) 
 	return &xs[0], nil
 }
 
-// MarkSynced фиксирует, что задача и событие совпадают: updated_at не двигаем,
-// а gcal_synced_at выравниваем по нему — иначе следующий синк выгрузил бы её снова.
-func (s *Store) MarkSynced(ctx context.Context, id, calID, eventID, etag string) error {
-	_, err := s.db.Exec(ctx, `UPDATE items SET gcal_calendar_id=$2, gcal_event_id=$3, sync_etag=$4,
-		gcal_synced_at=updated_at WHERE id=$1`, id, calID, eventID, etag)
-	return err
+// ErrSyncConflict means the local item changed after the sync snapshot was read.
+var ErrSyncConflict = errors.New("задача изменилась во время синхронизации")
+
+// WithSyncVersion locks the item until fn completes, and only applies a remote
+// change if both its local version and Google binding still match the snapshot.
+func (s *Store) WithSyncVersion(ctx context.Context, before SyncedItem, fn func(*Store) error) error {
+	return s.InTx(ctx, func(tx *Store) error {
+		xs, err := tx.querySynced(ctx, `i.id = $1 FOR UPDATE OF i`, before.ID)
+		if err != nil {
+			return err
+		}
+		if len(xs) == 0 || !xs[0].UpdatedAt.Equal(before.UpdatedAt) ||
+			!sameSyncString(xs[0].CalendarID, before.CalendarID) ||
+			!sameSyncString(xs[0].EventID, before.EventID) ||
+			!sameSyncString(xs[0].Etag, before.Etag) {
+			return ErrSyncConflict
+		}
+		return fn(tx)
+	})
 }
 
-func (s *Store) Unlink(ctx context.Context, id string) error {
+func sameSyncString(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// MarkSynced records the version actually sent to Google, so edits made during
+// the HTTP request remain dirty and are uploaded on the next pass.
+func (s *Store) MarkSynced(ctx context.Context, id, calID, eventID, etag string, version time.Time) error {
+	return s.InTx(ctx, func(tx *Store) error {
+		tag, err := tx.db.Exec(ctx, `UPDATE items SET gcal_calendar_id=$2, gcal_event_id=$3, sync_etag=$4,
+			gcal_synced_at=$5 WHERE id=$1`, id, calID, eventID, etag, version)
+		if err != nil || tag.RowsAffected() != 0 {
+			return err
+		}
+		// The item may have been deleted while its first event was being created.
+		_, err = tx.db.Exec(ctx, `INSERT INTO gcal_tombstones (calendar_id, event_id) VALUES ($1,$2)
+			ON CONFLICT DO NOTHING`, calID, eventID)
+		return err
+	})
+}
+
+func (s *Store) Unlink(ctx context.Context, id string, version time.Time) error {
 	_, err := s.db.Exec(ctx, `UPDATE items SET gcal_calendar_id=NULL, gcal_event_id=NULL, sync_etag=NULL,
-		gcal_synced_at=updated_at WHERE id=$1`, id)
+		gcal_synced_at=$2 WHERE id=$1`, id, version)
 	return err
 }
 

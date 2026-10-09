@@ -1,0 +1,11 @@
+.git
+.pgdata
+.env
+.env.*
+!.env.example
+.go
+bin
+tmp
+backups
+files
+node_modules

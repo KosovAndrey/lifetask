@@ -1,5 +1,6 @@
 // LifeTask — веб-интерфейс. Без фреймворков: DOM строится функцией h(),
 // данные пользователя вставляются только как текст (никакого innerHTML).
+import { createOutbox, replayOutbox } from './queue.mjs';
 
 // ── API ──────────────────────────────────────────────────────────────────────
 
@@ -7,31 +8,7 @@ class AuthError extends Error {}
 
 // Очередь записей без сети: IndexedDB «lifetask/outbox». Каждая запись несёт
 // Idempotency-Key — сервер выполнит её ровно один раз, даже если ответ потеряется.
-const outbox = {
-  db: null,
-  async open() {
-    if (this.db) return this.db;
-    this.db = await new Promise((resolve, reject) => {
-      const req = indexedDB.open('lifetask', 1);
-      req.onupgradeneeded = () => req.result.createObjectStore('outbox', { keyPath: 'key' });
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-    return this.db;
-  },
-  async tx(mode, fn) {
-    const db = await this.open();
-    return new Promise((resolve, reject) => {
-      const t = db.transaction('outbox', mode);
-      const r = fn(t.objectStore('outbox'));
-      t.oncomplete = () => resolve(r && r.result);
-      t.onerror = () => reject(t.error);
-    });
-  },
-  add(entry) { return this.tx('readwrite', (st) => st.put(entry)); },
-  remove(key) { return this.tx('readwrite', (st) => st.delete(key)); },
-  async all() { return ((await this.tx('readonly', (st) => st.getAll())) || []).sort((a, b) => a.ts - b.ts); },
-};
+const outbox = createOutbox(indexedDB);
 
 let offlineSince = null;
 
@@ -81,34 +58,54 @@ async function api(method, path, body) {
   return data;
 }
 
-let flushing = false;
-async function flushQueue() {
-  if (flushing || !navigator.onLine) return;
-  flushing = true;
-  let sent = 0;
-  try {
-    for (const e of await outbox.all()) {
-      let res;
-      try { res = await send(e.method, e.path, e.body, e.key); } catch { break; } // сети всё ещё нет
-      if (res.status === 401) break; // войдёт — отправим
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        toast(`Не отправилось: ${e.label} — ${data.error || res.statusText}`);
+let flushing = null;
+let queueTimer;
+function flushQueue(onlyKey) {
+  if (flushing) return flushing;
+  if (!navigator.onLine) return Promise.resolve();
+  clearTimeout(queueTimer);
+  flushing = (async () => {
+    try {
+      const r = await replayOutbox({ store: outbox, send, onlyKey });
+      if (r.nextRetryAt !== null) {
+        queueTimer = setTimeout(() => flushQueue(), Math.max(0, Math.min(2147483647, r.nextRetryAt - Date.now())));
       }
-      await outbox.remove(e.key);
-      sent++;
+      if (r.sent) toast(`Отправлено из очереди: ${r.sent}`);
+      else if (r.failed) toast('Некоторые изменения не отправились — проверь очередь во «Входящих»');
+      if (r.changed) render();
+    } catch (err) { handleError(err); }
+    finally {
+      flushing = null;
+      refreshQueueBadge();
     }
-  } finally {
-    flushing = false;
-    refreshQueueBadge();
-  }
-  if (sent) { toast(`Отправлено из очереди: ${sent}`); render(); }
+  })();
+  return flushing;
+}
+
+async function retryQueued(key) {
+  if (flushing) await flushing;
+  const entry = (await outbox.all()).find((e) => e.key === key);
+  if (!entry) return;
+  await outbox.add({ ...entry, state: 'pending', retryAt: null, attempts: 0, error: null });
+  await flushQueue(key);
+  render();
+}
+
+async function discardQueued(key) {
+  if (flushing) await flushing;
+  await outbox.remove(key);
+  await refreshQueueBadge();
+  render();
+  flushQueue();
 }
 
 async function refreshQueueBadge() {
-  const n = (await outbox.all().catch(() => [])).length;
+  const entries = await outbox.all().catch(() => []);
+  const n = entries.length;
+  const failed = entries.filter((e) => e.state === 'failed' || e.state === 'auth').length;
   const b = $('queue-count');
-  b.textContent = `⏳ ${n}`;
+  b.textContent = `${failed ? '⚠️' : '⏳'} ${n}`;
+  b.title = failed ? 'Есть неотправленные изменения — проверь очередь во «Входящих»' : 'Ждут отправки — список во «Входящих»';
   b.hidden = n === 0;
 }
 
@@ -1414,7 +1411,14 @@ async function queueSection() {
   if (!q.length) return null;
   return [h('div', { class: 'section' }, `Ждут отправки · ${q.length}`),
     h('div', { class: 'items queue-list' }, q.map((e) => h('div', { class: 'q card' },
-      h('span', {}, e.label), h('button', { class: 'btn danger', title: 'Не отправлять', onclick: async () => { await outbox.remove(e.key); render(); refreshQueueBadge(); } }, '✗'))))];
+      h('div', { class: 'queue-detail' }, h('div', {}, e.label),
+        e.error ? h('div', { class: 'queue-error' }, e.error) : null,
+        h('div', { class: 'hint' }, e.state === 'failed' ? 'Не отправлено — повтори или удали из очереди'
+          : e.state === 'auth' ? 'Нужен вход — после входа можно повторить'
+          : e.retryAt ? `Повторю после ${new Date(e.retryAt).toLocaleTimeString('ru-RU')}` : 'Сохранено на этом устройстве')),
+      h('div', { class: 'queue-actions' },
+        h('button', { class: 'btn', onclick: () => retryQueued(e.key).catch(handleError) }, 'Повторить'),
+        h('button', { class: 'btn danger', title: 'Не отправлять', onclick: () => discardQueued(e.key).catch(handleError) }, 'Удалить')))))];
 }
 
 async function logout() {
@@ -1623,7 +1627,16 @@ async function render() {
     $('view').replaceChildren(...[nodes].flat(Infinity).filter(Boolean));
     if (tab === 'stats' || tab === 'graph') charts.forEach((draw) => draw());
     refreshInboxCount();
-  } catch (err) { handleError(err); }
+  } catch (err) {
+    handleError(err);
+    // The local outbox must remain accessible even if the inbox API is down.
+    if (tab === 'inbox' && !(err instanceof AuthError)) {
+      const queue = await queueSection();
+      if (queue && seq === renderSeq) $('view').replaceChildren(
+        h('h1', {}, 'Входящие'), h('p', { class: 'hint' }, 'Не удалось загрузить входящие. Неотправленные изменения сохранены на этом устройстве.'),
+        ...queue);
+    }
+  }
 }
 
 async function refreshInboxCount() {

@@ -57,6 +57,9 @@ jobs:
       - uses: actions/checkout@v4
       - run: node --check internal/web/static/app.js
       - run: node --check internal/web/static/sw.js
+      - run: node --check internal/web/static/queue.mjs
+      - run: node --test internal/web/queue_test.mjs
+      - run: sh deploy/files-backup-test.sh
 
   deploy:
     needs: [go, web]

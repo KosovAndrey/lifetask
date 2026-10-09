@@ -47,6 +47,7 @@ type API interface {
 	FindCalendar(ctx context.Context, summary string) (string, error)
 	CreateCalendar(ctx context.Context, summary string) (string, error)
 	ListEvents(ctx context.Context, calendarID string, from, to time.Time) ([]Event, error)
+	GetEvent(ctx context.Context, calendarID, eventID string) (Event, error)
 	InsertEvent(ctx context.Context, calendarID string, e Event) (Event, error)
 	UpdateEvent(ctx context.Context, calendarID string, e Event) (Event, error)
 	DeleteEvent(ctx context.Context, calendarID, eventID string) error
@@ -300,6 +301,14 @@ func (g *Google) ListEvents(ctx context.Context, calendarID string, from, to tim
 			return out, nil
 		}
 	}
+}
+
+// GetEvent also finds events moved outside the reconciliation window and
+// returns cancelled tombstones so absence from ListEvents is never a deletion.
+func (g *Google) GetEvent(ctx context.Context, calendarID, eventID string) (Event, error) {
+	var a apiEvent
+	err := g.do(ctx, "GET", calAPI+"/calendars/"+url.PathEscape(calendarID)+"/events/"+url.PathEscape(eventID), nil, &a)
+	return fromAPI(a), err
 }
 
 func (g *Google) InsertEvent(ctx context.Context, calendarID string, e Event) (Event, error) {

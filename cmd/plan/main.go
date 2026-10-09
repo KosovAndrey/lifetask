@@ -26,7 +26,7 @@ import (
 
 const usage = `plan — разбор задач lifeplan
 
-  plan day [today|tomorrow|YYYY-MM-DD]   день: встречи, задачи, дедлайны, просрочка
+  plan day [today|tomorrow|YYYY-MM-DD]   день: встречи, задачи, дедлайны, просрочка, загрузка, самочувствие
   plan week [дата]                        неделя с понедельника
   plan inbox                              неразобранные входящие
   plan list [open] [sphere=<slug>] [q=<текст>] [status=a,b]
@@ -38,7 +38,8 @@ const usage = `plan — разбор задач lifeplan
   plan apply <plan-id>                    применить план
   plan reject <plan-id>                   отклонить план
   plan brief <evening|morning> <дата> <file | ->   свой текст брифа (уйдёт в 21:00 / 07:00)
-  plan journal [дата]                     дневник дня: настроение, текст, итог, что сделано
+  plan journal [дата]                     дневник дня: настроение, самочувствие, текст, итог, что сделано
+  plan health [дней|from to]              сон, заряд, стресс, шаги по дням + настроение и сделанное (по умолчанию 7 дней)
   plan journal-summary <дата> <file | ->  записать итог дня (после разбора)
   plan get <путь>                         сырой GET /api/<путь>
 
@@ -94,6 +95,8 @@ func main() {
 		err = cmdBrief(arg(args, 0, ""), arg(args, 1, "tomorrow"), arg(args, 2, "-"))
 	case "journal":
 		err = cmdJournal(arg(args, 0, "today"))
+	case "health":
+		err = cmdHealth(args)
 	case "journal-summary":
 		var raw []byte
 		if raw, err = readInput(arg(args, 1, "-")); err == nil {
@@ -209,12 +212,18 @@ func opts() render.Opts {
 	return render.Opts{IDs: true, Spheres: sphereNames}
 }
 
+// cmdDay — день из /api/plan: к самому дню добавляются загрузка (что не влезает)
+// и самочувствие из Garmin — на разборе видно, на что хватит сил.
 func cmdDay(date string) error {
-	var d store.Day
-	if err := call("GET", "day/"+date, nil, &d); err != nil {
+	var p store.DayPlan
+	if err := call("GET", "plan/"+date, nil, &p); err != nil {
 		return err
 	}
-	fmt.Print(render.Day(d, true, opts()))
+	fmt.Print(render.Day(p.Day, true, opts()))
+	if h := render.Health(p.Health); h != "" {
+		fmt.Println("  самочувствие: " + h)
+	}
+	fmt.Print(render.Load(p, opts()))
 	return nil
 }
 
@@ -395,6 +404,10 @@ func cmdJournal(date string) error {
 		mood = map[int]string{1: "😞 1", 2: "😕 2", 3: "😐 3", 4: "🙂 4", 5: "😄 5"}[*j.Mood]
 	}
 	fmt.Printf("── дневник %s · настроение %s · учтено %s\n", j.Date, mood, render.Mins(j.Minutes))
+	var hs []store.HealthDay
+	if err := call("GET", "health?from="+j.Date.String()+"&to="+j.Date.AddDays(1).String(), nil, &hs); err == nil && len(hs) > 0 {
+		fmt.Println("самочувствие: " + render.Health(&hs[0]))
+	}
 	if j.Text != "" {
 		fmt.Println(j.Text)
 	} else {
@@ -408,6 +421,66 @@ func cmdJournal(date string) error {
 		for _, it := range j.Done {
 			fmt.Println("  " + render.Line(it, false, opts()))
 		}
+	}
+	return nil
+}
+
+// cmdHealth — самочувствие по дням рядом с настроением и сделанным: для недельного
+// разбора («после короткого сна план срывается?»). Аргументы: число дней или from to.
+func cmdHealth(args []string) error {
+	to := domain.Today().AddDays(1)
+	from := to.AddDays(-7)
+	switch {
+	case len(args) >= 2:
+		f, err1 := domain.ParseDate(args[0])
+		t, err2 := domain.ParseDate(args[1])
+		if err1 != nil || err2 != nil {
+			return fmt.Errorf("даты — YYYY-MM-DD")
+		}
+		from, to = f, t
+	case len(args) == 1:
+		var n int
+		if _, err := fmt.Sscan(args[0], &n); err != nil || n < 1 || n > 366 {
+			return fmt.Errorf("число дней — от 1 до 366")
+		}
+		from = to.AddDays(-n)
+	}
+	var st store.Stats
+	if err := call("GET", "stats?from="+from.String()+"&to="+to.String(), nil, &st); err != nil {
+		return err
+	}
+	health := map[string]*store.HealthDay{}
+	for i := range st.Health {
+		health[st.Health[i].Date.String()] = &st.Health[i]
+	}
+	moods := map[string]int{}
+	for _, m := range st.Moods {
+		moods[m.Date.String()] = m.Mood
+	}
+	fmt.Printf("── самочувствие %s — %s\n", from, to.AddDays(-1))
+	var sleepSum, sleepN int
+	for _, d := range st.Days {
+		k := d.Date.String()
+		line := render.Health(health[k])
+		if line == "" {
+			line = "нет данных"
+		}
+		if h := health[k]; h != nil && h.SleepMin != nil {
+			sleepSum += *h.SleepMin
+			sleepN++
+		}
+		mood := ""
+		if m, ok := moods[k]; ok {
+			mood = fmt.Sprintf(" · настроение %d", m)
+		}
+		plan := ""
+		if all := d.PlanDone + d.PlanMissed + d.PlanMoved; all > 0 {
+			plan = fmt.Sprintf(" · план %d/%d", d.PlanDone, all)
+		}
+		fmt.Printf("  %s  %s  | сделано %d%s%s\n", render.DayLabel(d.Date.Time), line, d.Done, plan, mood)
+	}
+	if sleepN > 0 {
+		fmt.Printf("  средний сон %s по %d ночам\n", render.Mins(sleepSum/sleepN), sleepN)
 	}
 	return nil
 }

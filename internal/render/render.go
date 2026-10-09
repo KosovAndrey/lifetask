@@ -122,3 +122,49 @@ func Day(d store.Day, withOverdue bool, o Opts) string {
 	}
 	return b.String()
 }
+
+// Health — самочувствие дня одной строкой: «сон 7ч15 (81) · заряд 78 · стресс 31 · шаги 8432 · пульс 54».
+// Пусто, если данных нет.
+func Health(h *store.HealthDay) string {
+	if h == nil {
+		return ""
+	}
+	var parts []string
+	if h.SleepMin != nil {
+		s := "сон " + Mins(*h.SleepMin)
+		if h.SleepScore != nil {
+			s += fmt.Sprintf(" (%d)", *h.SleepScore)
+		}
+		parts = append(parts, s)
+	}
+	add := func(label string, v *int) {
+		if v != nil {
+			parts = append(parts, fmt.Sprintf("%s %d", label, *v))
+		}
+	}
+	add("заряд", h.BodyBattery)
+	add("стресс", h.StressAvg)
+	add("шаги", h.Steps)
+	add("пульс", h.RestingHR)
+	return strings.Join(parts, " · ")
+}
+
+// Load — загрузка дня для разбора: сколько дел при свободном времени и что не влезает (с id).
+func Load(p store.DayPlan, o Opts) string {
+	if p.LoadMin == 0 && p.BusyMin == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "  загрузка: дела %s при свободных %s (день %s, встречи %s)", Mins(p.LoadMin), Mins(p.FreeMin), Mins(p.CapacityMin), Mins(p.BusyMin))
+	if p.Unestimated > 0 {
+		fmt.Fprintf(&b, ", без оценки %d — по %s", p.Unestimated, Mins(store.DefaultEstimateMin))
+	}
+	b.WriteString("\n")
+	if len(p.Overflow) > 0 {
+		fmt.Fprintf(&b, "  не влезает (%d):\n", len(p.Overflow))
+		for _, it := range p.Overflow {
+			b.WriteString("    " + Line(it, false, o) + "\n")
+		}
+	}
+	return b.String()
+}

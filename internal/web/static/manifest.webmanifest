@@ -3,8 +3,8 @@
   "short_name": "LifeTask",
   "start_url": "/#/day",
   "display": "standalone",
-  "background_color": "#111318",
-  "theme_color": "#111318",
+  "background_color": "#f7f8f4",
+  "theme_color": "#f7f8f4",
   "icons": [
     {"src": "icon.svg", "sizes": "any", "type": "image/svg+xml"},
     {"src": "icon-180.png", "sizes": "180x180", "type": "image/png"},

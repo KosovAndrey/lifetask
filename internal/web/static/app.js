@@ -256,25 +256,28 @@ function itemRow(it, { withDate = false, onChange } = {}) {
     dataset: { id: it.id },
   },
     h('button', {
-      class: 'check', 'aria-label': closed ? 'Вернуть в работу' : 'Готово',
+      class: 'check', 'aria-label': `${closed ? 'Вернуть в работу' : 'Завершить'}: ${it.title}`, 'aria-pressed': String(it.status === 'done'),
       onclick: async (e) => {
         e.stopPropagation();
+        const button = e.currentTarget;
         try {
-          const next = it.status === 'done' ? 'todo' : 'done';
+          const next = it.status === 'done' || it.status === 'cancelled' ? 'todo' : 'done';
           const r = await api('PATCH', `items/${it.id}`, { status: next });
           if (r && r.queued) {
             // Без сети — показываем результат сразу, отправится позже.
             it.status = next;
-            e.target.closest('.item').classList.toggle('done', next === 'done');
-            e.target.textContent = next === 'done' ? '✓' : '';
+            button.closest('.item').classList.toggle('done', next === 'done');
+            button.textContent = next === 'done' ? '✓' : '';
+            button.setAttribute('aria-pressed', String(next === 'done'));
+            button.setAttribute('aria-label', `${next === 'done' ? 'Вернуть в работу' : 'Завершить'}: ${it.title}`);
             return;
           }
           onChange && onChange();
         } catch (err) { handleError(err); }
       },
     }, it.status === 'done' ? '✓' : ''),
-    h('div', { class: 'body', onclick: () => openEditor(it.id, onChange) },
-      h('div', { class: 'title' }, time, it.kind !== 'task' ? `[${KINDS[it.kind].toLowerCase()}] ` : '', it.title, it.recurrence_id ? ' 🔁' : ''),
+    h('div', { class: 'body' },
+      h('button', { class: 'title task-title-button', type: 'button', onclick: () => openEditor(it.id, onChange) }, time, it.kind !== 'task' && it.kind !== 'event' ? `${KINDS[it.kind]} · ` : '', it.title, it.recurrence_id ? ' 🔁' : ''),
       meta.length ? h('div', { class: 'meta' }, meta) : null,
       it.progress != null ? h('div', { class: 'row mini-progress', title: 'Прогресс по весу частей' },
         h('div', { class: 'progress' }, h('i', { style: { width: `${Math.round(it.progress * 100)}%` } })),
@@ -293,58 +296,78 @@ async function viewDay(date) {
   const day = await api('GET', `day/${date}`);
   const today = todayStr();
   const reload = () => render();
+  const unique = (items) => [...new Map(items.map((it) => [it.id, it])).values()];
+  const scheduled = unique(day.scheduled || []);
+  const planned = unique(day.planned || []);
+  const primaryIDs = new Set([...scheduled, ...planned].map((it) => it.id));
+  const deadlines = unique(day.deadlines || []).filter((it) => !primaryIDs.has(it.id));
+  const visibleIDs = new Set([...primaryIDs, ...deadlines.map((it) => it.id)]);
+  const overdue = unique(day.overdue || []).filter((it) => !visibleIDs.has(it.id));
+  const closed = (it) => it.status === 'done' || it.status === 'cancelled';
+  const activeScheduled = scheduled.filter((it) => !closed(it));
+  const activePlanned = planned.filter((it) => !closed(it));
+  const completed = unique([...scheduled, ...planned]).filter(closed);
+  const tasks = unique([...activeScheduled, ...activePlanned, ...deadlines]).filter((it) => it.kind !== 'event');
 
-  const input = h('input', { placeholder: '«завтра в 16 созвон», «уборка 40м»…', enterkeyhint: 'done', 'aria-label': 'Новая задача' });
-  // Разбор на сервере теми же правилами, что в боте: «завтра в 16 созвон»,
-  // «уборка каждую субботу», «уборка 40м». Без сети — в очередь, разберётся при отправке.
-  const add = async () => {
+  const input = h('input', { id: 'day-quick-add', placeholder: 'Например, «созвон в 16»', enterkeyhint: 'done', autocomplete: 'off' });
+  const addButton = h('button', { class: 'btn primary', type: 'submit' }, 'Добавить');
+  const add = async (e) => {
+    e?.preventDefault();
     const text = input.value.trim();
-    if (!text) return;
+    if (!text || addButton.disabled) return;
+    addButton.disabled = true;
     try {
       const p = await api('POST', 'quick', { text, date });
       input.value = '';
       if (p && p.preview) toast(p.preview.join(' · '));
       if (!p || !p.queued) reload();
     } catch (err) { handleError(err); }
+    finally { addButton.disabled = false; }
   };
-  input.addEventListener('keydown', (e) => e.key === 'Enter' && add());
 
-  const sections = [];
-  const sec = (title, items, opts) => {
-    if (items.length) sections.push(h('div', { class: 'section' }, title), list(items, { onChange: reload, ...opts }));
-  };
-  sec('По времени', day.scheduled);
-  sec('Задачи', day.planned);
-  sec('Дедлайны', day.deadlines, { withDate: true });
-  if (day.overdue.length) {
-    sections.push(
-      h('div', { class: 'section row' }, `Хвосты с прошлых дней · ${day.overdue.length}`),
-      h('div', { class: 'items' }, day.overdue.map((it) => {
-        const row = itemRow(it, { withDate: true, onChange: reload });
-        row.append(h('button', {
-          class: 'btn side', title: 'Перенести на этот день',
-          onclick: async () => {
-            try { await api('PATCH', `items/${it.id}`, { planned_date: date }); reload(); } catch (err) { handleError(err); }
-          },
-        }, '→ сюда'));
-        return row;
-      })),
-    );
-  }
-  if (!day.scheduled.length && !day.planned.length && !day.deadlines.length) {
-    sections.push(h('div', { class: 'empty' }, 'На этот день ничего нет.'));
-  }
+  const panel = (title, items, empty, opts = {}, extra = null) => h('section', { class: 'panel card' },
+    h('div', { class: 'panel-head' }, h('h2', {}, title), h('span', { class: 'count' }, items.length), extra),
+    items.length ? list(items, { onChange: reload, ...opts }) : h('div', { class: 'empty' }, empty));
+  const stat = (value, label) => h('div', { class: 'summary-stat' },
+    h('span', { class: 'summary-value' }, value), h('span', { class: 'summary-label' }, label));
+  const dateHeading = new Date(date + 'T12:00:00Z').toLocaleDateString('ru-RU', { timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long' });
 
   return [
-    h('div', { class: 'bar' },
-      h('button', { class: 'btn icon', 'aria-label': 'Предыдущий день', onclick: () => go(`#/day/${addDays(date, -1)}`) }, '‹'),
-      h('h1', {}, date === today ? `Сегодня, ${dayTitle(date).split(', ')[1]}` : dayTitle(date)),
-      date !== today ? h('button', { class: 'btn', onclick: () => go('#/day') }, 'Сегодня') : null,
-      h('button', { class: 'btn icon', 'aria-label': 'Следующий день', onclick: () => go(`#/day/${addDays(date, 1)}`) }, '›'),
-      h('div', { class: 'sub' }, `встречи ${mins(day.busy_min)} · запланировано ${mins(day.plan_min)}`),
-    ),
-    h('div', { class: 'quick' }, input, h('button', { class: 'btn primary', onclick: add }, 'Добавить')),
-    sections,
+    h('div', { class: 'page-head' },
+      h('div', {}, h('div', { class: 'eyebrow' }, 'План дня'),
+        h('h1', { class: 'page-title' }, date === today ? 'Сегодня' : date === addDays(today, 1) ? 'Завтра' : dayTitle(date).split(', ')[1]),
+        h('p', { class: 'page-description' }, dateHeading)),
+      h('div', { class: 'page-head-actions date-nav' },
+        h('button', { class: 'btn icon', 'aria-label': 'Предыдущий день', onclick: () => go(`#/day/${addDays(date, -1)}`) }, '‹'),
+        h('button', { class: 'btn', onclick: () => go('#/day') }, 'Сегодня'),
+        h('button', { class: 'btn icon', 'aria-label': 'Следующий день', onclick: () => go(`#/day/${addDays(date, 1)}`) }, '›'))),
+    h('div', { class: 'day-summary', 'aria-label': 'Обзор дня' },
+      stat(tasks.length, 'Дел на день'), stat(mins(day.plan_min || 0), 'Оценка задач'),
+      stat(activeScheduled.length, 'В расписании'), stat(mins(day.busy_min || 0), 'Время в расписании')),
+    h('form', { class: 'quick card', onsubmit: add },
+      h('label', { class: 'quick-label', for: 'day-quick-add' }, 'Что нужно сделать?'),
+      h('div', { class: 'quick-controls' }, input, addButton),
+      h('div', { class: 'quick-hint' }, 'Дату, время и длительность можно написать словами.')),
+    h('div', { class: 'day-layout' },
+      h('div', { class: 'day-main' },
+        panel('Задачи на день', activePlanned, 'План свободен. Добавьте первое дело выше.', {},
+          h('button', { class: 'btn panel-add', 'aria-label': 'Новая задача на этот день', onclick: () => openEditor(null, reload, { planned_date: date }) }, '+ Задача')),
+        deadlines.length ? panel('Дедлайны сегодня', deadlines, '', { withDate: true }) : null,
+        overdue.length ? h('details', { class: 'day-fold card overdue-fold' },
+          h('summary', {}, h('span', { class: 'fold-title' }, 'С прошлых дней'), h('span', { class: 'count' }, overdue.length)),
+          h('p', { class: 'fold-hint' }, 'Выберите, что перенести в этот день.'),
+          h('div', { class: 'items' }, overdue.map((it) => {
+            const row = itemRow(it, { withDate: true, onChange: reload });
+            row.append(h('button', { class: 'btn side', 'aria-label': `Перенести на ${shortDay(date)}: ${it.title}`, onclick: async () => {
+              try { await api('PATCH', `items/${it.id}`, { planned_date: date }); reload(); } catch (err) { handleError(err); }
+            } }, 'На этот день'));
+            return row;
+          }))) : null,
+        completed.length ? h('details', { class: 'day-fold card completed-fold' },
+          h('summary', {}, h('span', { class: 'fold-title' }, 'Завершено'), h('span', { class: 'count' }, completed.length)),
+          list(completed, { onChange: reload })) : null),
+      h('aside', { class: 'day-side', 'aria-label': 'Расписание дня' },
+        panel('Расписание', activeScheduled, 'Встреч и дел с точным временем пока нет.'))),
   ];
 }
 
@@ -380,6 +403,7 @@ async function viewWeek(date) {
 
 const COLUMNS = [['todo', 'К выполнению'], ['doing', 'В работе'], ['waiting', 'Жду'], ['done', 'Готово · 7 дней']];
 let boardSphere = null;
+let boardStatus = null;
 
 async function viewBoard() {
   const all = await api('GET', 'items?status=todo,doing,waiting&done_days=7&limit=500');
@@ -398,16 +422,20 @@ async function viewBoard() {
   items.sort((a, b) => a.quadrant - b.quadrant || (a.planned_date || '9').localeCompare(b.planned_date || '9'));
 
   const chips = h('div', { class: 'chips' },
-    h('button', { class: `chip ${boardSphere === null ? 'on' : ''}`, onclick: () => { boardSphere = null; render(); } }, 'Все'),
+    h('button', { class: `chip ${boardSphere === null ? 'on' : ''}`, 'aria-pressed': String(boardSphere === null), onclick: () => { boardSphere = null; render(); } }, 'Все'),
     state.spheres.map((s) => h('button', {
-      class: `chip ${boardSphere === s.id ? 'on' : ''}`, onclick: () => { boardSphere = s.id; render(); },
+      class: `chip ${boardSphere === s.id ? 'on' : ''}`, 'aria-pressed': String(boardSphere === s.id), onclick: () => { boardSphere = s.id; render(); },
     }, `${s.icon} ${s.name}`)));
 
   const move = async (id, status) => {
     try { await api('PATCH', `items/${id}`, { status }); render(); } catch (err) { handleError(err); }
   };
 
-  const cols = COLUMNS.map(([status, title]) => {
+  const statusFilter = h('select', { class: 'board-status-filter', 'aria-label': 'Показать статус на доске', onchange: (e) => { boardStatus = e.target.value || null; render(); } },
+    h('option', { value: '', selected: boardStatus === null }, 'Все статусы'),
+    COLUMNS.map(([status, title]) => h('option', { value: status, selected: boardStatus === status }, title)));
+
+  const cols = COLUMNS.filter(([status]) => boardStatus === null || boardStatus === status).map(([status, title]) => {
     const colItems = items.filter((it) => it.status === status);
     const col = h('div', { class: 'col', dataset: { status } },
       h('h2', {}, title, h('span', { class: 'load' }, String(colItems.length))),
@@ -415,6 +443,8 @@ async function viewBoard() {
         const row = itemRow(it, { withDate: true, onChange: render });
         row.draggable = true;
         row.addEventListener('dragstart', (e) => e.dataTransfer.setData('text/plain', it.id));
+        row.append(h('select', { class: 'board-move', 'aria-label': `Статус: ${it.title}`, onchange: (e) => move(it.id, e.target.value) },
+          COLUMNS.map(([value, label]) => h('option', { value, selected: value === it.status }, label.replace(' · 7 дней', '')))));
         return row;
       })));
     col.addEventListener('dragover', (e) => { e.preventDefault(); col.classList.add('drop'); });
@@ -428,47 +458,61 @@ async function viewBoard() {
     return col;
   });
 
-  return [h('div', { class: 'bar' }, h('h1', {}, 'Доска')), chips, h('div', { class: 'board' }, cols)];
+  return [
+    h('div', { class: 'page-head' }, h('div', {}, h('div', { class: 'eyebrow' }, 'Рабочий процесс'),
+      h('h1', { class: 'page-title' }, 'Доска'), h('p', { class: 'page-description' }, 'Все дела по статусам. Меняйте статус в карточке или перетаскивайте её.'))),
+    h('div', { class: 'board-toolbar' }, chips, statusFilter),
+    h('div', { class: `board${boardStatus ? ' board-filtered' : ''}` }, cols),
+  ];
 }
 
 // ── Экран «Входящие» ─────────────────────────────────────────────────────────
 
 async function viewInbox() {
   const msgs = await api('GET', 'inbox');
-  const input = h('textarea', { rows: 2, placeholder: 'Записать мысль — разберём вечером', 'aria-label': 'Новая запись' });
-  const add = async () => {
+  const input = h('textarea', { id: 'inbox-capture', rows: 3, placeholder: 'Идея, дело или мысль — запишите, пока помните.' });
+  const addButton = h('button', { class: 'btn primary', type: 'submit' }, 'Сохранить во входящие');
+  const add = async (e) => {
+    e?.preventDefault();
     const text = input.value.trim();
-    if (!text) return;
+    if (!text || addButton.disabled) return;
+    addButton.disabled = true;
     try { await api('POST', 'inbox', { text }); input.value = ''; render(); } catch (err) { handleError(err); }
+    finally { addButton.disabled = false; }
   };
   const resolve = async (id, status) => {
     try { await api('POST', `inbox/${id}/resolve`, { status }); render(); } catch (err) { handleError(err); }
   };
-  const statusLabel = { new: 'новое', proposed: 'ждёт кнопки в боте', deferred: 'на вечер' };
+  const statusLabel = { new: 'Новая запись', proposed: 'Подтвердите в боте', deferred: 'На вечерний разбор' };
+  const row = (m) => h('article', { class: 'inbox-row card' },
+    h('div', { class: 'text' },
+      h('div', { class: 'inbox-message' }, m.transcript || m.text),
+      (m.files || []).map((b) => fileBlock(b)),
+      h('div', { class: 'when' }, `${shortDay(mskDate(m.created_at))} · ${hm(m.created_at)}`, h('span', { class: 'tag' }, statusLabel[m.status] || m.status)),
+      m.parse_error ? h('div', { class: 'err' }, 'Не удалось разобрать: ' + m.parse_error) : null),
+    h('div', { class: 'acts' },
+      h('button', { class: 'btn primary', onclick: async () => {
+        try {
+          const p = await api('POST', 'quick', { inbox_id: m.id });
+          if (p && p.preview) toast(p.preview.filter((l) => !l.startsWith('📥')).join(' · '));
+          render();
+        } catch (err) { handleError(err); }
+      } }, 'Создать задачу'),
+      m.status !== 'deferred' ? h('button', { class: 'btn', onclick: () => resolve(m.id, 'deferred') }, 'На вечер') : null,
+      h('button', { class: 'btn danger', 'aria-label': `Удалить запись: ${(m.transcript || m.text || '').slice(0, 60)}`, onclick: () => resolve(m.id, 'rejected') }, 'Удалить')));
+  const pending = msgs.filter((m) => m.status !== 'deferred');
+  const deferred = msgs.filter((m) => m.status === 'deferred');
+  const group = (title, items) => items.length ? h('section', { class: 'inbox-group' },
+    h('div', { class: 'panel-head' }, h('h2', {}, title), h('span', { class: 'count' }, items.length)),
+    h('div', { class: 'inbox-list' }, items.map(row))) : null;
 
   return [
-    h('div', { class: 'bar' }, h('h1', {}, 'Входящие'),
-      h('div', { class: 'sub' }, '✓ — оформить автоматически (даты, время, повторы), 📥 — оставить на вечерний разбор.')),
-    h('div', { class: 'field' }, input),
-    h('div', { class: 'actions' }, h('button', { class: 'btn primary', onclick: add }, 'Записать')),
-    msgs.length ? h('div', { class: 'items' }, msgs.map((m) =>
-      h('div', { class: 'inbox-row card' },
-        h('div', { class: 'text' },
-          (m.transcript ? '🎤 ' + m.transcript : m.text),
-          (m.files || []).map((b) => fileBlock(b)),
-          h('div', { class: 'when' }, `${shortDay(mskDate(m.created_at))} ${hm(m.created_at)} · ${statusLabel[m.status] || m.status}`),
-          m.parse_error ? h('div', { class: 'err' }, 'не разобралось: ' + m.parse_error) : null),
-        h('div', { class: 'acts' },
-          h('button', { class: 'btn', title: 'Оформить по правилам', onclick: async () => {
-            try {
-              const p = await api('POST', 'quick', { inbox_id: m.id });
-              if (p && p.preview) toast(p.preview.filter((l) => !l.startsWith('📥')).join(' · '));
-              render();
-            } catch (err) { handleError(err); }
-          } }, '✓'),
-          m.status !== 'deferred' ? h('button', { class: 'btn', title: 'На вечер', onclick: () => resolve(m.id, 'deferred') }, '📥') : null,
-          h('button', { class: 'btn danger', title: 'Удалить', onclick: () => resolve(m.id, 'rejected') }, '✗'))))
-    ) : h('div', { class: 'empty' }, 'Пусто — всё разобрано.'),
+    h('div', { class: 'page-head' }, h('div', {}, h('div', { class: 'eyebrow' }, 'Освободить голову'),
+      h('h1', { class: 'page-title' }, 'Входящие'), h('p', { class: 'page-description' }, 'Соберите мысли здесь. Превратите их в задачи или оставьте на вечер.'))),
+    h('form', { class: 'inbox-composer card', onsubmit: add },
+      h('label', { class: 'field', for: 'inbox-capture' }, 'Быстрая запись', input),
+      h('div', { class: 'actions' }, h('span', { class: 'hint' }, 'При создании задачи дата, время и повторы распознаются автоматически.'), addButton)),
+    msgs.length ? [group('Разобрать', pending), group('На вечер', deferred)] : h('div', { class: 'empty card' }, 'Всё разобрано. Здесь появятся новые записи.'),
     await queueSection(),
     h('div', { class: 'footer-links' }, h('button', { onclick: logout }, 'Выйти на этом устройстве')),
   ];
@@ -476,10 +520,25 @@ async function viewInbox() {
 
 // ── Карточка задачи ──────────────────────────────────────────────────────────
 
+let sheetReturnFocus = null;
+let sheetInertElements = [];
+
 function closeSheet() {
-  $('sheet').hidden = true;
+  const sheet = $('sheet');
+  const wasOpen = !sheet.hidden;
+  sheet.hidden = true;
   $('sheet-backdrop').hidden = true;
-  $('sheet').replaceChildren();
+  sheet.replaceChildren();
+  sheet.onkeydown = null;
+  sheet.onpaste = null;
+  document.body.classList.remove('sheet-open');
+  for (const [el, previous] of sheetInertElements) el.inert = previous;
+  sheetInertElements = [];
+  if (wasOpen) {
+    const target = sheetReturnFocus?.isConnected ? sheetReturnFocus : $('fab');
+    if (target && !target.hidden) target.focus({ preventScroll: true });
+  }
+  sheetReturnFocus = null;
 }
 
 // Минимальный markdown → DOM: абзацы, списки «- », **жирный**, `код`, ссылки.
@@ -606,6 +665,7 @@ function seg(options, value, onPick) {
 }
 
 async function openEditor(id, onDone, preset = {}) {
+  if ($('sheet').hidden) sheetReturnFocus = document.activeElement;
   let detail;
   try {
     detail = id ? await api('GET', `items/${id}`) : {
@@ -627,7 +687,7 @@ async function openEditor(id, onDone, preset = {}) {
   const project = h('select', {}, h('option', { value: '' }, '— без проекта —'),
     [...(state.projects || [])].sort((a, b) => projectPath(a).localeCompare(projectPath(b)))
       .map((p) => h('option', { value: p.id, selected: p.id === it.project_id }, projectPath(p))));
-  const newProject = h('button', { class: 'btn icon', type: 'button', title: 'Новый проект', onclick: async () => {
+  const newProject = h('button', { class: 'btn icon', type: 'button', title: 'Новый проект', 'aria-label': 'Создать проект', onclick: async () => {
     const name = prompt('Название проекта (группу можно задать позже):');
     if (!name || !name.trim()) return;
     try {
@@ -680,10 +740,11 @@ async function openEditor(id, onDone, preset = {}) {
 
   let kind = it.kind;
   const kindSeg = seg(KINDS, kind, (k) => (kind = k));
+  kindSeg.setAttribute('aria-label', 'Тип записи');
 
   // Учёт времени: добавить минуты (секундомер на часах → сюда).
   const spent = h('span', {}, it.spent_min ? `факт ${mins(it.spent_min)}` : 'факт —');
-  const addMin = h('input', { type: 'number', min: 1, inputmode: 'numeric', placeholder: 'мин', style: { width: '80px' } });
+  const addMin = h('input', { type: 'number', min: 1, inputmode: 'numeric', 'aria-label': 'Добавить потраченные минуты', placeholder: 'мин', style: { width: '80px' } });
   const timeRow = id ? h('div', { class: 'row' }, spent, addMin, h('button', {
     class: 'btn', type: 'button', onclick: async () => {
       const m = parseInt(addMin.value, 10);
@@ -775,7 +836,8 @@ async function openEditor(id, onDone, preset = {}) {
     const base = id ? detail : {};
     const set = (k, v) => { if (JSON.stringify(v) !== JSON.stringify(base[k] ?? null)) patch[k] = v; };
     const t = title.value.trim();
-    if (!t) return toast('Нужно название');
+    if (!t) { title.setAttribute('aria-invalid', 'true'); title.focus(); return toast('Нужно название'); }
+    title.removeAttribute('aria-invalid');
     set('title', t);
     set('kind', kind);
     set('status', status.value);
@@ -852,48 +914,73 @@ async function openEditor(id, onDone, preset = {}) {
 
   const f = (label, el, cls) => h('label', { class: `field ${cls || ''}` }, label, el);
 
-  $('sheet').replaceChildren(...[
-    title,
-    h('div', { class: 'grid' },
-      h('div', { class: 'wide' }, kindSeg),
-      f('Сфера', sphere),
-      f('Статус', status),
-      h('label', { class: 'field wide' }, 'Проект', h('div', { class: 'row' }, project, newProject)),
-      h('div', { class: 'wide row' },
-        h('label', { class: 'toggle' }, important, 'Важно'),
-        h('label', { class: 'toggle' }, urgent, 'Срочно'),
-        qlabel),
-      f('Дата', date),
-      f('Дедлайн', deadline),
-      f('С', from),
-      f('До', to),
-      f('Оценка, мин', estimate),
-      f('Теги', tags),
-      // Вес важен только части чего-то: подзадаче или задаче «часть цели».
-      it.parent_id || (detail.relations || []).some((r) => r.type === 'part_of' && r.from_id === it.id)
-        ? f('Вес в прогрессе родителя', weight) : null,
-      timeRow ? h('div', { class: 'wide' }, timeRow) : null,
-      it.postpone_count ? h('div', { class: 'wide field' }, `Переносов: ${it.postpone_count}`) : null,
-      it.recurrence_id ? h('div', { class: 'wide row field' }, '🔁 Экземпляр повтора: переносы не считаются', stopRepeat) : null,
-      !id ? f('Повтор', repeat, 'wide') : null,
-      h('div', { class: 'wide' }, blocksEl),
-      h('div', { class: 'wide' }, dropZone),
-    ),
+  const saveButton = h('button', { class: 'btn primary', type: 'button', onclick: async () => {
+    if (saveButton.disabled) return;
+    saveButton.disabled = true;
+    try { await save(); } finally { saveButton.disabled = false; }
+  } }, 'Сохранить');
+  const editorSection = (heading, ...nodes) => h('section', { class: 'editor-section' },
+    h('h3', { class: 'section' }, heading), ...nodes);
+  const sheet = $('sheet');
+  sheet.replaceChildren(...[
+    h('div', { class: 'sheet-head' },
+      h('div', {}, h('div', { class: 'eyebrow' }, id ? 'Редактирование' : 'Новое дело'),
+        h('h2', { id: 'editor-heading' }, id ? 'Карточка задачи' : 'Новая задача')),
+      h('button', { class: 'btn icon', type: 'button', 'aria-label': 'Закрыть карточку', onclick: closeSheet }, '×')),
+    f('Название', title, 'editor-title'),
+    editorSection('Основное', h('div', { class: 'grid' },
+      f('Статус', status), f('Сфера', sphere), f('Дата', date), f('Оценка, мин', estimate))),
+    h('details', { class: 'editor-details', open: !!it.start_at || it.kind === 'event' },
+      h('summary', {}, 'Дополнительные параметры'),
+      h('div', { class: 'grid' },
+        h('div', { class: 'field wide' }, h('span', {}, 'Тип записи'), kindSeg),
+        h('label', { class: 'field wide' }, 'Проект', h('div', { class: 'row' }, project, newProject)),
+        h('div', { class: 'wide row' },
+          h('label', { class: 'toggle' }, important, 'Важно'),
+          h('label', { class: 'toggle' }, urgent, 'Срочно'), qlabel),
+        f('Начало, МСК', from), f('Окончание, МСК', to),
+        f('Дедлайн', deadline), f('Теги', tags),
+        it.parent_id || (detail.relations || []).some((r) => r.type === 'part_of' && r.from_id === it.id)
+          ? f('Вес в прогрессе родителя', weight) : null,
+        timeRow ? h('div', { class: 'wide' }, timeRow) : null,
+        it.postpone_count ? h('div', { class: 'wide field' }, `Переносов: ${it.postpone_count}`) : null,
+        it.recurrence_id ? h('div', { class: 'wide row field' }, 'Экземпляр повтора', stopRepeat) : null,
+        !id ? f('Повтор', repeat, 'wide') : null)),
+    editorSection('Заметки и файлы', blocksEl, dropZone),
     subs,
-    id ? relationsBlock(detail, () => openEditor(id, onDone)) : null,
-    h('div', { class: 'actions' },
+    id ? h('details', { class: 'editor-details' }, h('summary', {}, 'Связи с другими задачами'),
+      relationsBlock(detail, () => openEditor(id, onDone))) : null,
+    h('div', { class: 'actions sheet-actions' },
       id ? h('button', { class: 'btn danger', type: 'button', onclick: remove }, 'Удалить') : null,
       h('span', { class: 'spacer' }),
-      h('button', { class: 'btn', type: 'button', onclick: closeSheet }, 'Отмена'),
-      h('button', { class: 'btn primary', type: 'button', onclick: save }, 'Сохранить')),
+      h('button', { class: 'btn', type: 'button', onclick: closeSheet }, 'Отмена'), saveButton),
   ].filter(Boolean));
-  $('sheet').hidden = false;
+  sheet.hidden = false;
+  sheet.setAttribute('aria-labelledby', 'editor-heading');
+  sheet.setAttribute('tabindex', '-1');
   $('sheet-backdrop').hidden = false;
-  $('sheet').onpaste = (e) => {
+  document.body.classList.add('sheet-open');
+  if (!sheetInertElements.length) {
+    sheetInertElements = [...document.body.children]
+      .filter((el) => !el.contains(sheet) && !el.contains($('sheet-backdrop')) && !el.contains($('toast')))
+      .map((el) => [el, el.inert]);
+    for (const [el] of sheetInertElements) el.inert = true;
+  }
+  sheet.onkeydown = (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); saveButton.click(); return; }
+    if (e.key !== 'Tab') return;
+    const focusable = [...sheet.querySelectorAll('button, input, select, textarea, a[href], summary, [tabindex]')]
+      .filter((el) => !el.disabled && !el.hidden && el.tabIndex >= 0 && el.getClientRects().length);
+    if (!focusable.length) { e.preventDefault(); sheet.focus(); return; }
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (e.shiftKey && (document.activeElement === first || document.activeElement === sheet)) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  };
+  sheet.onpaste = (e) => {
     const list = [...(e.clipboardData && e.clipboardData.files) || []];
     if (list.length) { e.preventDefault(); attach(list); }
   };
-  if (!id) title.focus();
+  title.focus({ preventScroll: true });
 }
 
 // ── Подсказка (общая для всех графиков) ─────────────────────────────────────
@@ -1572,6 +1659,25 @@ async function viewSpheres() {
   ];
 }
 
+// Поиск объединяет задачи, события, цели и заметки в одном месте.
+async function viewSearch(encoded) {
+  let query;
+  try { query = decodeURIComponent(encoded || ''); } catch { query = encoded || ''; }
+  $('search-input').value = query;
+  const items = query ? await api('GET', `items?q=${encodeURIComponent(query)}&limit=100`) : [];
+  const tasks = items.filter((it) => it.kind !== 'note');
+  const notes = items.filter((it) => it.kind === 'note');
+  const section = (title, values) => values.length ? h('section', { class: 'panel card' },
+    h('div', { class: 'panel-head' }, h('h2', {}, title), h('span', { class: 'count' }, values.length)),
+    list(values, { withDate: true, onChange: render })) : null;
+  return h('div', { class: 'search-results' },
+    h('div', { class: 'page-head' }, h('div', {}, h('div', { class: 'eyebrow' }, 'Поиск по пространству'),
+      h('h1', { class: 'page-title' }, query ? `«${query}»` : 'Что найти?'),
+      h('p', { class: 'page-description' }, items.length === 100 ? 'Первые 100 результатов. Уточните запрос, чтобы найти нужное.' : `Найдено: ${items.length}`))),
+    section('Задачи, события и цели', tasks), section('Заметки', notes),
+    !items.length ? h('div', { class: 'panel card empty' }, 'Ничего не найдено. Попробуйте другое слово из названия или заметки.') : null);
+}
+
 // ── Роутинг ──────────────────────────────────────────────────────────────────
 
 function go(hash) { location.hash = hash; }
@@ -1593,6 +1699,7 @@ function handleError(err) {
 function showLogin(msg) {
   closeSheet();
   $('fab').hidden = true;
+  $('nav-create').hidden = true;
   $('view').replaceChildren(h('div', { class: 'login card' },
     h('h1', {}, 'LifeTask'),
     h('p', {}, 'Напиши боту ', h('b', {}, '/login'), ' — он пришлёт ссылку для входа.'),
@@ -1616,15 +1723,16 @@ async function render() {
       case 'journal': nodes = await viewJournal(arg || todayStr()); break;
       case 'notes': nodes = await viewNotes(); break;
       case 'spheres': nodes = await viewSpheres(); break;
+      case 'search': nodes = await viewSearch(arg); break;
       default: nodes = await viewDay(arg || todayStr());
     }
     if (seq !== renderSeq) return; // пока грузили, пользователь ушёл на другой экран
     $('fab').hidden = tab === 'spheres';
+    $('nav-create').hidden = false;
     // Вкладку подсвечиваем только после загрузки: без сети экран остаётся прежним.
-    document.querySelectorAll('.tabs a').forEach((a) => a.classList.toggle('active', a.dataset.tab === tab));
-    // На телефоне вкладки прокручиваются — активная должна быть видна.
-    document.querySelector('.tabs a.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    document.querySelectorAll('.nav-link[data-tab]').forEach((a) => a.classList.toggle('active', a.dataset.tab === tab));
     $('view').replaceChildren(...[nodes].flat(Infinity).filter(Boolean));
+    window.dispatchEvent(new Event('lifetask:rendered'));
     if (tab === 'stats' || tab === 'graph') charts.forEach((draw) => draw());
     refreshInboxCount();
   } catch (err) {

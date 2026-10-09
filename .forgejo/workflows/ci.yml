@@ -59,6 +59,7 @@ jobs:
       - run: node --check internal/web/static/sw.js
       - run: python3 deploy/garmin_sync_test.py
       - run: node --check internal/web/static/queue.mjs
+      - run: node --check internal/web/static/shell.mjs
       - run: node --test internal/web/queue_test.mjs
       - run: sh deploy/files-backup-test.sh
 

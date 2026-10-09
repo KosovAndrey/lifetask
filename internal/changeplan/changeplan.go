@@ -59,6 +59,8 @@ type Plan struct {
 	Refs      map[string]string `json:"refs,omitempty"`
 	CreatedAt time.Time         `json:"created_at"`
 	AppliedAt *time.Time        `json:"applied_at,omitempty"`
+
+	itemVersions map[string]int64
 }
 
 type Service struct {
@@ -66,6 +68,10 @@ type Service struct {
 }
 
 var errDryRun = errors.New("dry run")
+
+// ErrConflict means the proposed plan no longer matches the current state.
+// The caller must propose a fresh plan before applying it.
+var ErrConflict = errors.New("план устарел или уже обработан")
 
 func New(st *store.Store) *Service { return &Service{st: st} }
 
@@ -75,8 +81,13 @@ func (s *Service) Propose(ctx context.Context, author, summary string, ops []Op)
 		return Plan{}, errors.New("пустой план")
 	}
 	var preview []string
+	var versions map[string]int64
 	err := s.st.InTx(ctx, func(tx *store.Store) error {
 		var err error
+		versions, err = lockItemVersions(ctx, tx, referencedItems(ops))
+		if err != nil {
+			return err
+		}
 		preview, _, err = run(ctx, tx, ops, author)
 		if err != nil {
 			return err
@@ -87,9 +98,9 @@ func (s *Service) Propose(ctx context.Context, author, summary string, ops []Op)
 		return Plan{}, err
 	}
 	p := Plan{Author: author, Summary: summary, Ops: ops, Status: "proposed", Preview: preview}
-	err = s.st.Raw().QueryRow(ctx, `INSERT INTO change_plans (author, summary, ops, result)
-		VALUES ($1,$2,$3,$4) RETURNING id, created_at`,
-		author, summary, ops, map[string]any{"preview": preview}).Scan(&p.ID, &p.CreatedAt)
+	err = s.st.Raw().QueryRow(ctx, `INSERT INTO change_plans (author, summary, ops, result, item_versions)
+		VALUES ($1,$2,$3,$4,$5) RETURNING id, created_at`,
+		author, summary, ops, map[string]any{"preview": preview}, versions).Scan(&p.ID, &p.CreatedAt)
 	return p, err
 }
 
@@ -120,13 +131,21 @@ func (s *Service) ApplyNow(ctx context.Context, author, summary string, ops []Op
 }
 
 func (s *Service) Get(ctx context.Context, id string) (Plan, error) {
+	return getPlan(ctx, s.st, id, false)
+}
+
+func getPlan(ctx context.Context, st *store.Store, id string, lock bool) (Plan, error) {
 	var p Plan
 	var result struct {
 		Preview []string          `json:"preview"`
 		Refs    map[string]string `json:"refs"`
 	}
-	err := s.st.Raw().QueryRow(ctx, `SELECT id, author, summary, ops, status, result, created_at, applied_at
-		FROM change_plans WHERE id=$1`, id).Scan(&p.ID, &p.Author, &p.Summary, &p.Ops, &p.Status, &result, &p.CreatedAt, &p.AppliedAt)
+	query := `SELECT id, author, summary, ops, status, result, created_at, applied_at, item_versions
+		FROM change_plans WHERE id=$1`
+	if lock {
+		query += ` FOR UPDATE`
+	}
+	err := st.Raw().QueryRow(ctx, query, id).Scan(&p.ID, &p.Author, &p.Summary, &p.Ops, &p.Status, &result, &p.CreatedAt, &p.AppliedAt, &p.itemVersions)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return p, store.ErrNotFound
 	}
@@ -137,14 +156,29 @@ func (s *Service) Get(ctx context.Context, id string) (Plan, error) {
 // Apply применяет ранее предложенный план. Данные могли измениться с момента
 // Propose — тогда план упадёт целиком и ничего не применится.
 func (s *Service) Apply(ctx context.Context, id string) (Plan, error) {
-	p, err := s.Get(ctx, id)
-	if err != nil {
-		return p, err
-	}
-	if p.Status != "proposed" {
-		return p, fmt.Errorf("план уже %s", p.Status)
-	}
-	err = s.st.InTx(ctx, func(tx *store.Store) error {
+	var p Plan
+	err := s.st.InTx(ctx, func(tx *store.Store) error {
+		var err error
+		p, err = getPlan(ctx, tx, id, true)
+		if err != nil {
+			return err
+		}
+		if p.Status != "proposed" {
+			return fmt.Errorf("%w: план уже %s", ErrConflict, p.Status)
+		}
+		ids := referencedItems(p.Ops)
+		if p.itemVersions == nil && len(ids) > 0 {
+			return fmt.Errorf("%w: предложите план заново", ErrConflict)
+		}
+		current, err := lockItemVersions(ctx, tx, ids)
+		if err != nil {
+			return err
+		}
+		for itemID, version := range p.itemVersions {
+			if current[itemID] != version {
+				return fmt.Errorf("%w: задача %s изменилась", ErrConflict, itemID)
+			}
+		}
 		lines, refs, err := run(ctx, tx, p.Ops, p.Author)
 		if err != nil {
 			return err
@@ -166,9 +200,73 @@ func (s *Service) Reject(ctx context.Context, id string) error {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return errors.New("план не найден или уже не в статусе proposed")
+		return fmt.Errorf("%w: план не найден или уже не в статусе proposed", ErrConflict)
 	}
 	return nil
+}
+
+// referencedItems collects only existing item references. IDs of inbox entries
+// and recurrence series belong to other tables; $refs are created by this plan.
+func referencedItems(ops []Op) []string {
+	ids := map[string]bool{}
+	add := func(id string) {
+		if id != "" && !strings.HasPrefix(id, "$") {
+			ids[id] = true
+		}
+	}
+	for _, op := range ops {
+		var fields map[string]json.RawMessage
+		switch op.Op {
+		case "create", "recur":
+			fields = op.Item
+		case "update":
+			fields = op.Set
+			add(op.ID)
+		case "done", "delete", "log_time":
+			add(op.ID)
+		case "relate", "unrelate":
+			add(op.From)
+			add(op.To)
+		case "inbox":
+			add(op.To)
+		}
+		for _, key := range []string{"parent", "parent_id"} {
+			var id string
+			if json.Unmarshal(fields[key], &id) == nil {
+				add(id)
+			}
+		}
+	}
+	out := make([]string, 0, len(ids))
+	for id := range ids {
+		out = append(out, id)
+	}
+	return out
+}
+
+// Lock in database ID order so overlapping plans cannot invert the lock order.
+// Capture before run: repeated operations must compare against the original
+// version, not an intermediate state from the dry run.
+func lockItemVersions(ctx context.Context, st *store.Store, ids []string) (map[string]int64, error) {
+	versions := map[string]int64{}
+	if len(ids) == 0 {
+		return versions, nil
+	}
+	rows, err := st.Raw().Query(ctx, `SELECT id::text, version FROM items
+		WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var version int64
+		if err := rows.Scan(&id, &version); err != nil {
+			return nil, err
+		}
+		versions[id] = version
+	}
+	return versions, rows.Err()
 }
 
 // ── Исполнение ───────────────────────────────────────────────────────────────

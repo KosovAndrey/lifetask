@@ -132,14 +132,3 @@ func (s *Store) BriefByMessage(ctx context.Context, msgID int64) (domain.Date, s
 	}
 	return *toDate(&d), kind, true, nil
 }
-
-// ClaimIdempotencyKey — true, если ключ новый (запрос выполняем); false — повтор.
-func (s *Store) ClaimIdempotencyKey(ctx context.Context, key string) (bool, error) {
-	tag, err := s.db.Exec(ctx, `INSERT INTO idempotency_keys (key) VALUES ($1) ON CONFLICT DO NOTHING`, key)
-	return tag.RowsAffected() == 1, err
-}
-
-func (s *Store) ReleaseIdempotencyKey(ctx context.Context, key string) error {
-	_, err := s.db.Exec(ctx, `DELETE FROM idempotency_keys WHERE key=$1`, key)
-	return err
-}

@@ -14,7 +14,7 @@ services:
       LISTEN_ADDR: "0.0.0.0:8090"
       TZ: "Europe/Moscow"
       FILES_DIR: /data/files      # вложения, если Google Drive не подключён
-      BACKUP_DIR: /backups        # дампы отсюда копируются в Google Drive
+      BACKUP_DIR: /backups        # дампы БД и архивы files копируются в Google Drive
     volumes:
       - files:/data/files
       - ./backups:/backups:ro
@@ -62,6 +62,20 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+
+  files-backup:
+    build: .
+    image: lifeplan-app:latest
+    container_name: lp_files_backup
+    restart: unless-stopped
+    user: "0:0"                  # чтение вложений app (uid 10001), запуск crond
+    entrypoint: ["/usr/local/bin/files-backup-loop.sh"]
+    environment:
+      TZ: "Europe/Moscow"
+      FILES_BACKUP_KEEP: "30"
+    volumes:
+      - files:/data/files:ro
+      - ./backups:/backups
 
 volumes:
   pgdata:

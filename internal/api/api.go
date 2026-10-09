@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -38,8 +39,21 @@ func New(st *store.Store, token string) *API {
 const sessionCookie = "lp_session"
 
 func (a *API) Handler() http.Handler {
+	return a.auth(a.idempotent(a.routes()))
+}
+
+func (a *API) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if _, err := a.st.Raw().Exec(ctx, "SELECT 1"); err != nil {
+			writeErr(w, http.StatusServiceUnavailable, errors.New("база недоступна"))
+			return
+		}
+		w.Write([]byte("ok"))
+	})
 	mux.HandleFunc("GET /login", a.login)
 	mux.HandleFunc("POST /api/logout", a.logout)
 	mux.HandleFunc("GET /api/me", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, map[string]bool{"ok": true}) })
@@ -82,42 +96,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /api/plans/{id}/apply", a.applyPlan)
 	mux.HandleFunc("POST /api/plans/{id}/reject", a.rejectPlan)
 	a.planningRoutes(mux)
-	return a.auth(a.idempotent(mux))
-}
-
-// statusRecorder запоминает код ответа обработчика.
-type statusRecorder struct {
-	http.ResponseWriter
-	code int
-}
-
-func (r *statusRecorder) WriteHeader(code int) { r.code = code; r.ResponseWriter.WriteHeader(code) }
-
-// idempotent: запись с заголовком Idempotency-Key выполняется один раз. Офлайн-очередь
-// веба может повторить запрос, ответ на который потерялся, — дубля не будет.
-// Ключ освобождается, если обработчик упал с 5xx: такой запрос можно повторить.
-func (a *API) idempotent(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := r.Header.Get("Idempotency-Key")
-		if key == "" || r.Method == http.MethodGet || len(key) > 100 {
-			next.ServeHTTP(w, r)
-			return
-		}
-		fresh, err := a.st.ClaimIdempotencyKey(r.Context(), key)
-		if err != nil {
-			fail(w, err)
-			return
-		}
-		if !fresh {
-			writeJSON(w, http.StatusOK, map[string]bool{"duplicate": true})
-			return
-		}
-		rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
-		next.ServeHTTP(rec, r)
-		if rec.code >= 500 {
-			_ = a.st.ReleaseIdempotencyKey(r.Context(), key)
-		}
-	})
+	return mux
 }
 
 // auth: /api/* — Bearer-токен (CLI, Claude) или cookie-сессия (веб). Для записи
@@ -219,6 +198,8 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 // остальное (валидация) → 400.
 func fail(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, changeplan.ErrConflict):
+		writeErr(w, http.StatusConflict, err)
 	case errors.Is(err, store.ErrNotFound):
 		writeErr(w, http.StatusNotFound, err)
 	case isDBError(err):

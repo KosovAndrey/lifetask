@@ -14,7 +14,16 @@ import (
 // AttachFiles дописывает блоки файлов в body задачи — через UpdateItem, чтобы
 // изменение попало в журнал. Вызывать в транзакции (UpdateItem блокирует строку).
 func (s *Store) AttachFiles(ctx context.Context, itemID string, blocks []domain.Block, actor string) (domain.Item, error) {
-	cur, err := s.GetItem(ctx, itemID)
+	if s.pool != nil {
+		var out domain.Item
+		err := s.InTx(ctx, func(tx *Store) error {
+			var err error
+			out, err = tx.AttachFiles(ctx, itemID, blocks, actor)
+			return err
+		})
+		return out, err
+	}
+	cur, err := s.getForUpdate(ctx, itemID)
 	if err != nil {
 		return cur, err
 	}

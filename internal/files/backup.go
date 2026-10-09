@@ -2,6 +2,7 @@ package files
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -11,15 +12,38 @@ import (
 	"time"
 )
 
-// BackupKeep — сколько последних дампов держать в Drive (локально ротацией
-// занимается контейнер бэкапов).
+// BackupKeep — сколько последних копий каждого вида держать в Drive.
 const BackupKeep = 30
 
-// UploadBackup кладёт в Drive (LifeTask/Бэкапы) самый свежий дамп из dir, если
-// его там ещё нет, и убирает в корзину дампы сверх BackupKeep. Возвращает имя
-// загруженного файла или "".
+// UploadBackup кладёт в Drive (LifeTask/Бэкапы) свежий дамп БД и архив локальных
+// вложений. Ротация независима: по BackupKeep копий каждого вида. Возвращает
+// имена загруженных файлов через запятую или "". Сбой одного вида не мешает другому.
 func (s *Store) UploadBackup(ctx context.Context, dir string) (string, error) {
-	path, err := newestDump(dir)
+	if s.Drive == nil {
+		return "", nil
+	}
+	var uploaded []string
+	var errs []error
+	for _, match := range []func(string) bool{isDump, isFilesBackup} {
+		name, err := s.uploadBackupKind(ctx, dir, match)
+		if name != "" {
+			uploaded = append(uploaded, name)
+		}
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return strings.Join(uploaded, ", "), errors.Join(errs...)
+}
+
+func isDump(name string) bool { return strings.HasSuffix(name, ".sql.gz") }
+
+func isFilesBackup(name string) bool {
+	return strings.HasPrefix(name, "files-") && strings.HasSuffix(name, ".tar.gz")
+}
+
+func (s *Store) uploadBackupKind(ctx context.Context, dir string, match func(string) bool) (string, error) {
+	path, err := newestBackup(dir, match)
 	if err != nil || path == "" {
 		return "", err
 	}
@@ -45,9 +69,15 @@ func (s *Store) UploadBackup(ctx context.Context, dir string) (string, error) {
 		have = append(have, DriveFileInfo{ID: id, Name: name})
 		uploaded = name
 	}
-	// Список идёт от старых к новым — лишние в начале.
-	for i := 0; i < len(have)-BackupKeep; i++ {
-		if err := s.Drive.DriveTrash(ctx, have[i].ID); err != nil {
+	// DriveList идёт от старых к новым; посторонние файлы не трогаем.
+	var kind []DriveFileInfo
+	for _, f := range have {
+		if match(f.Name) {
+			kind = append(kind, f)
+		}
+	}
+	for i := 0; i < len(kind)-BackupKeep; i++ {
+		if err := s.Drive.DriveTrash(ctx, kind[i].ID); err != nil {
 			return uploaded, err
 		}
 	}
@@ -75,9 +105,9 @@ func (s *Store) RunBackups(ctx context.Context, dir string, every time.Duration)
 	}
 }
 
-// newestDump — самый свежий *.sql.gz в dir (рекурсивно). «latest»-ссылки
-// пропускаем: у них одно имя на все дни.
-func newestDump(dir string) (string, error) {
+// newestBackup — самая свежая опубликованная копия в dir (рекурсивно).
+// Временные файлы и «latest»-ссылки пропускаем.
+func newestBackup(dir string, match func(string) bool) (string, error) {
 	type dump struct {
 		path string
 		mod  time.Time
@@ -91,7 +121,7 @@ func newestDump(dir string) (string, error) {
 			return nil
 		}
 		name := d.Name()
-		if d.Type()&fs.ModeSymlink != 0 || d.IsDir() || !strings.HasSuffix(name, ".sql.gz") || strings.Contains(name, "latest") {
+		if d.Type()&fs.ModeSymlink != 0 || d.IsDir() || !match(name) || strings.Contains(name, "latest") {
 			return nil
 		}
 		info, err := d.Info()
@@ -106,7 +136,12 @@ func newestDump(dir string) (string, error) {
 	if err != nil || len(dumps) == 0 {
 		return "", err
 	}
-	sort.Slice(dumps, func(i, j int) bool { return dumps[i].mod.After(dumps[j].mod) })
+	sort.Slice(dumps, func(i, j int) bool {
+		if dumps[i].mod.Equal(dumps[j].mod) {
+			return dumps[i].path > dumps[j].path
+		}
+		return dumps[i].mod.After(dumps[j].mod)
+	})
 	return dumps[0].path, nil
 }
 

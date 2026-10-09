@@ -175,17 +175,18 @@ func TestIdempotencyAndProgress(t *testing.T) {
 		h.ServeHTTP(rec, req)
 		return rec.Code, rec.Body.String()
 	}
-	if code, _ := post(`{"title":"Цель","kind":"goal"}`, "k1"); code != 201 {
-		t.Fatalf("первый: %d", code)
+	firstCode, firstBody := post(`{"title":"Цель","kind":"goal"}`, "k1")
+	if firstCode != 201 {
+		t.Fatalf("первый: %d", firstCode)
 	}
-	if code, body := post(`{"title":"Цель","kind":"goal"}`, "k1"); code != 200 || !strings.Contains(body, "duplicate") {
+	if code, body := post(`{"title":"Цель","kind":"goal"}`, "k1"); code != firstCode || body != firstBody {
 		t.Fatalf("повтор: %d %s", code, body)
 	}
 	items, _ := st.ListItems(t.Context(), store.Filter{})
 	if len(items) != 1 {
 		t.Fatalf("дубль создан: %d", len(items))
 	}
-	// Ошибка валидации (4xx) ключ не освобождает, 5xx — освобождает (не проверить без поломки БД).
+	// Повтор возвращает тот же результат, включая id созданной задачи.
 	goal := items[0].ID
 	_, _ = post(`{"title":"a","parent_id":"`+goal+`","weight":3,"status":"done"}`, "k2")
 	_, _ = post(`{"title":"b","parent_id":"`+goal+`","weight":1}`, "k3")

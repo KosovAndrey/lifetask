@@ -146,22 +146,16 @@ func (s *Syncer) pullOwn(ctx context.Context, calID string) error {
 			return err
 		}
 	}
-	// Событие пропало из окна, а задача не менялась — его удалили в Google.
+	// A missing event may merely have moved outside the listing window.
 	linked, err := s.st.Linked(ctx, calID, from, to)
 	if err != nil {
 		return err
 	}
 	for _, it := range linked {
-		if seen[*it.EventID] || it.Dirty {
-			continue
-		}
-		if !it.Status.Closed() {
-			if _, err := s.st.UpdateItem(ctx, it.ID, store.Patch{"status": json.RawMessage(`"cancelled"`)}, actor); err != nil {
+		if !seen[*it.EventID] && !it.Dirty {
+			if err := s.reconcileMissing(ctx, it, calID); err != nil {
 				return err
 			}
-		}
-		if err := s.st.Unlink(ctx, it.ID); err != nil {
-			return err
 		}
 	}
 	return nil
@@ -198,8 +192,7 @@ func (s *Syncer) pullPrimary(ctx context.Context) error {
 	}
 	for _, it := range linked {
 		if !seen[*it.EventID] {
-			// Надгробие для primary игнорируется выгрузкой: чужое событие не удаляем.
-			if err := s.st.DeleteItem(ctx, it.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			if err := s.reconcileMissing(ctx, it, Primary); err != nil {
 				return err
 			}
 		}
@@ -207,16 +200,54 @@ func (s *Syncer) pullPrimary(ctx context.Context) error {
 	return nil
 }
 
+// reconcileMissing checks the event itself before applying a deletion. The row
+// version is checked again after HTTP returns, while holding its database lock.
+func (s *Syncer) reconcileMissing(ctx context.Context, it store.SyncedItem, calID string) error {
+	e, err := s.api.GetEvent(ctx, calID, *it.EventID)
+	if err == nil && e.Status != "cancelled" {
+		return s.applyEvent(ctx, it, calID, e)
+	}
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	err = s.st.WithSyncVersion(ctx, it, func(tx *store.Store) error {
+		if calID == Primary {
+			// Primary tombstones are ignored by push: do not delete the remote event.
+			return tx.DeleteItem(ctx, it.ID)
+		}
+		version := it.UpdatedAt
+		if !it.Status.Closed() {
+			next, err := tx.UpdateItem(ctx, it.ID, store.Patch{"status": mustJSON("cancelled")}, actor)
+			if err != nil {
+				return err
+			}
+			version = next.UpdatedAt
+		}
+		return tx.Unlink(ctx, it.ID, version)
+	})
+	return syncResult(err)
+}
+
+// A concurrent local edit is left dirty for push or the next sync pass.
+func syncResult(err error) error {
+	if errors.Is(err, store.ErrSyncConflict) {
+		return nil
+	}
+	return err
+}
+
 func (s *Syncer) importEvent(ctx context.Context, calID string, e Event, kind string) error {
 	it := domain.Item{Kind: domain.Kind(kind), Title: eventTitle(e), Source: "gcal"}
 	if !setWhen(&it, e) {
 		return nil
 	}
-	created, err := s.st.CreateItem(ctx, it, actor)
-	if err != nil {
-		return err
-	}
-	return s.st.MarkSynced(ctx, created.ID, calID, e.ID, e.Etag)
+	return s.st.InTx(ctx, func(tx *store.Store) error {
+		created, err := tx.CreateItem(ctx, it, actor)
+		if err != nil {
+			return err
+		}
+		return tx.MarkSynced(ctx, created.ID, calID, e.ID, e.Etag, created.UpdatedAt)
+	})
 }
 
 func (s *Syncer) applyEvent(ctx context.Context, it store.SyncedItem, calID string, e Event) error {
@@ -240,12 +271,17 @@ func (s *Syncer) applyEvent(ctx context.Context, it store.SyncedItem, calID stri
 	}
 	// Конец раньше старого начала даст ошибку валидации, если менять по одному —
 	// поэтому патч целиком, одним UpdateItem.
-	if len(patch) > 0 {
-		if _, err := s.st.UpdateItem(ctx, it.ID, patch, actor); err != nil {
-			return err
+	return syncResult(s.st.WithSyncVersion(ctx, it, func(tx *store.Store) error {
+		version := it.UpdatedAt
+		if len(patch) > 0 {
+			next, err := tx.UpdateItem(ctx, it.ID, patch, actor)
+			if err != nil {
+				return err
+			}
+			version = next.UpdatedAt
 		}
-	}
-	return s.st.MarkSynced(ctx, it.ID, calID, e.ID, e.Etag)
+		return tx.MarkSynced(ctx, it.ID, calID, e.ID, e.Etag, version)
+	}))
 }
 
 // eventTitle снимает нашу пометку «✓ » у выполненных.
@@ -311,7 +347,7 @@ func (s *Syncer) push(ctx context.Context, calID string) error {
 		if err := s.api.DeleteEvent(ctx, calID, *it.EventID); err != nil {
 			return err
 		}
-		if err := s.st.Unlink(ctx, it.ID); err != nil {
+		if err := s.st.Unlink(ctx, it.ID, it.UpdatedAt); err != nil {
 			return err
 		}
 	}
@@ -340,7 +376,7 @@ func (s *Syncer) push(ctx context.Context, calID string) error {
 		if err != nil {
 			return err
 		}
-		if err := s.st.MarkSynced(ctx, it.ID, calID, saved.ID, saved.Etag); err != nil {
+		if err := s.st.MarkSynced(ctx, it.ID, calID, saved.ID, saved.Etag, it.UpdatedAt); err != nil {
 			return err
 		}
 	}
